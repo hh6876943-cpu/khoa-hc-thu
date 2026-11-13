@@ -2277,7 +2277,6 @@
     function extractYouTubeId(url) {
       if (!url || typeof url !== 'string') return null;
       const value = url.trim();
-      // Chấp nhận cả ID video 11 ký tự và các dạng URL YouTube phổ biến.
       if (/^[a-zA-Z0-9_-]{11}$/.test(value)) return value;
       try {
         const parsed = new URL(value, window.location.href);
@@ -2307,8 +2306,6 @@
       currentLessonInfo = { title, mediaUrl };
       loadLessonPersonalNotes();
 
-      // YouTube API thay thế thẻ DIV đích bằng IFRAME sau lần phát đầu.
-      // Tạo lại DIV đích mỗi lần mở bài để các lần phát tiếp theo luôn hoạt động.
       if (ytPlayerInstance && typeof ytPlayerInstance.destroy === 'function') {
         try { ytPlayerInstance.destroy(); } catch (_) {}
       }
@@ -2343,8 +2340,6 @@
         const playerDiv = document.getElementById('ytPlayerDiv');
         if (!currentFrame) return;
 
-        // Khi dùng iframe trực tiếp, phải tắt lớp phủ và thanh điều khiển
-        // riêng (các nút này chỉ điều khiển được YT.Player API).
         if (currentGuard) currentGuard.style.display = 'none';
         if (controls) controls.style.display = 'none';
         if (playerDiv) playerDiv.style.display = 'none';
@@ -2362,7 +2357,6 @@
 
         if (typeof YT !== 'undefined' && YT.Player) {
           try {
-            // Nếu API không phát tín hiệu onReady, tự chuyển sang iframe thường.
             youtubeReadyTimer = setTimeout(showYouTubeFallback, 7000);
             ytPlayerInstance = new YT.Player('ytPlayerDiv', {
               videoId: ytId,
@@ -2376,7 +2370,6 @@
                     clearTimeout(youtubeReadyTimer);
                     youtubeReadyTimer = null;
                   }
-                  // Không ép tự phát: tránh bị trình duyệt/webview chặn.
                   const player = event.target;
                   if (player && player.getIframe) {
                     const frame = player.getIframe();
@@ -2391,11 +2384,10 @@
               }
             });
           } catch (error) {
-            console.warn('YouTube Player API không khởi tạo được, chuyển sang iframe dự phòng.', error);
+            console.warn('YouTube Player API error, falling back to iframe.', error);
             showYouTubeFallback();
           }
         } else {
-          // API chưa tải/bị chặn: dùng iframe YouTube trực tiếp.
           showYouTubeFallback();
         }
       } else if (mediaUrl && (/\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(mediaUrl) || mediaUrl.startsWith('blob:') || mediaUrl.startsWith('data:'))) {
@@ -2530,8 +2522,8 @@
       Object.entries(roomsData).forEach(([roomId, room]) => {
         let adminLiveActions = '';
         if (currentUser && currentUser.role === 'admin') {
-          const safeTitle = (room.title || '').replace(/'/g, "\\'");
-          const safeHost = (room.host || 'Admin').replace(/'/g, "\\'");
+          const safeTitle = (room.title || '').replace(/'/g, "\'");
+          const safeHost = (room.host || 'Admin').replace(/'/g, "\'");
           adminLiveActions = `
             <div style="display:flex; gap:8px; margin-top:12px;">
               <button class="admin-btn-sm admin-btn-warning" style="flex:1;" onclick="adminEditLiveRoom('${roomId}', '${safeTitle}', '${safeHost}')">Sửa Phòng</button>
@@ -2642,6 +2634,85 @@
       activeLiveRoomId = null;
       document.getElementById('activeLiveViewer').style.display = 'none';
     }
+
+    // --- MỚI BỔ SUNG CÁC HÀM THIẾU ĐỂ KHẮC PHỤC LỖI TRIỆT ĐỂ ---
+    async function adminStartScreenShare() {
+      if (!activeLiveRoomId) return;
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        const videoEl = document.getElementById('liveVideoPlayer');
+        videoEl.srcObject = stream;
+        videoEl.style.display = 'block';
+        document.getElementById('liveVideoPlaceholder').style.display = 'none';
+        
+        stream.getVideoTracks()[0].onended = () => {
+          adminEndLiveStream();
+        };
+        alert('Đã bắt đầu chia sẻ màn hình phòng live!');
+      } catch (err) {
+        console.error(err);
+        alert('Không thể chia sẻ màn hình: ' + err.message);
+      }
+    }
+
+    function adminBroadcastStreamUrlPrompt() {
+      if (!activeLiveRoomId) return;
+      const url = prompt('Nhập link video YouTube / Stream URL để phát trực tiếp trong phòng live:');
+      if (!url) return;
+      const ytId = extractYouTubeId(url);
+      const wrapper = document.getElementById('liveStreamIframeWrapper');
+      const videoEl = document.getElementById('liveVideoPlayer');
+      if (videoEl) videoEl.srcObject = null;
+      if (videoEl) videoEl.style.display = 'none';
+      document.getElementById('liveVideoPlaceholder').style.display = 'none';
+      
+      if (ytId) {
+        wrapper.style.display = 'block';
+        wrapper.innerHTML = `<iframe src="https://www.youtube.com/embed/${ytId}?autoplay=1&controls=1&playsinline=1" style="width:100%; height:100%; border:none;" allow="autoplay; encrypted-media; fullscreen" allowfullscreen></iframe>`;
+      } else {
+        wrapper.style.display = 'block';
+        wrapper.innerHTML = `<video src="${url}" autoplay controls playsinline style="width:100%; height:100%; background:#000;"></video>`;
+      }
+      db.ref(`liveRooms/${activeLiveRoomId}`).update({ streamUrl: url });
+      alert('Đã phát video trực tiếp cho toàn bộ phòng live!');
+    }
+
+    function copyLiveRoomLink() {
+      const link = window.location.href.split('#')[0] + '#room=' + activeLiveRoomId;
+      navigator.clipboard.writeText(link).then(() => {
+        alert('Đã sao chép liên kết phòng live vào bộ nhớ tạm!');
+      }).catch(() => {
+        prompt('Sao chép liên kết phòng live:', link);
+      });
+    }
+
+    function adminEndLiveStream() {
+      const videoEl = document.getElementById('liveVideoPlayer');
+      if (videoEl && videoEl.srcObject) {
+        videoEl.srcObject.getTracks().forEach(track => track.stop());
+        videoEl.srcObject = null;
+      }
+      const wrapper = document.getElementById('liveStreamIframeWrapper');
+      if (wrapper) {
+        wrapper.style.display = 'none';
+        wrapper.innerHTML = '';
+      }
+      document.getElementById('liveVideoPlaceholder').style.display = 'flex';
+      if (activeLiveRoomId) {
+        db.ref(`liveRooms/${activeLiveRoomId}`).update({ streamUrl: null });
+      }
+      alert('Đã kết thúc buổi phát trực tiếp!');
+    }
+
+    function adminDeleteExam(idx) {
+      if (confirm('Xóa vĩnh viễn bài thi thử này?')) {
+        examsData.splice(idx, 1);
+        db.ref('examsData').set(examsData);
+        renderExamList();
+        alert('Đã xóa đề thi thử thành công!');
+      }
+    }
+    // --- KẾT THÚC BỔ SUNG HÀM ---
 
     function renderExamList() {
       const container = document.getElementById('examListContainer');
@@ -2976,8 +3047,6 @@
         document.getElementById('courseSectionTitle').innerText = "HỆ THỐNG KHÓA HỌC VACT EDU";
 
         bigContainer.innerHTML = '';
-        // Khóa học là danh mục dùng chung: mọi học sinh đã đăng nhập đều xem được.
-        // assignedCourses chỉ còn phù hợp nếu sau này muốn giới hạn khóa học theo lớp/tài khoản.
         const visibleCourses = bigCoursesData;
 
         if (visibleCourses.length === 0) {
@@ -3027,9 +3096,9 @@
               let lessonsHTML = '';
               if (part.lessons) {
                 part.lessons.forEach((les, lesIdx) => {
-                  const safeTitle = les.title.replace(/'/g, "\\'");
-                  const safeUrl = les.videoUrl.replace(/'/g, "\\'");
-                  const docsJson = JSON.stringify(les.documents || []).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                  const safeTitle = les.title.replace(/'/g, "\'");
+                  const safeUrl = les.videoUrl.replace(/'/g, "\'");
+                  const docsJson = JSON.stringify(les.documents || []).replace(/'/g, "\'").replace(/"/g, '&quot;');
                   
                   let adminLessonEdit = '';
                   if (isAdmin) {
