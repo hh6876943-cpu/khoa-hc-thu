@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>V-ACT Edu</title>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -550,7 +551,9 @@
                 <div class="media-wrapper" id="mediaWrapper">
                   <div id="ytPlayerDiv"></div>
                   <video id="html5VideoPlayer" controls playsinline style="display:none; position:absolute; inset:0; width:100%; height:100%; background:#000; z-index:5;"></video>
-                  <iframe id="fallbackIframePlayer" style="display:none; position:absolute; inset:0; width:100%; height:100%; border:none; z-index:5;" allow="autoplay; fullscreen"></iframe>
+                  <iframe id="fallbackIframePlayer" style="display:none; position:absolute; inset:0; width:100%; height:100%; border:none; z-index:5;"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+                    referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
                   
 
                   <div class="watermark-overlay" id="watermarkOverlay"><span id="watermarkText">VACT EDU WATERMARK</span></div>
@@ -2264,107 +2267,198 @@
       else { if (document.exitFullscreen) document.exitFullscreen(); }
     }
 
-    function extractYouTubeId(url) {
-      if (!url) return null;
-      const regExp = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?|shorts|live)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/;
-      const match = url.match(regExp);
-      return match ? match[1] : null;
+    // Lấy ID từ các dạng link YouTube phổ biến.
+    function extractYouTubeId(rawUrl) {
+      if (!rawUrl) return null;
+      try {
+        const u = new URL(rawUrl.trim());
+        const host = u.hostname.replace(/^www\./, '').replace(/^m\./, '');
+        let id = null;
+        if (host === 'youtu.be') id = u.pathname.split('/').filter(Boolean)[0];
+        else if (host.endsWith('youtube.com')) {
+          if (u.pathname === '/watch') id = u.searchParams.get('v');
+          else {
+            const parts = u.pathname.split('/').filter(Boolean);
+            if (['embed', 'shorts', 'live', 'v'].includes(parts[0])) id = parts[1];
+          }
+        }
+        return id && /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+      } catch (e) {
+        return null;
+      }
     }
 
-    let isYTApiReady = false;
-    function onYouTubeIframeAPIReady() {
-      isYTApiReady = true;
+    let isYTApiReady = !!(window.YT && window.YT.Player);
+    let ytLoadPromise = null;
+    let activeVideoRequest = 0;
+
+    // Không gán đè callback của YouTube mỗi lần người dùng mở một bài học.
+    function waitForYouTubeAPI() {
+      if (window.YT && window.YT.Player) {
+        isYTApiReady = true;
+        return Promise.resolve();
+      }
+      if (ytLoadPromise) return ytLoadPromise;
+
+      ytLoadPromise = new Promise((resolve, reject) => {
+        const previousCallback = window.onYouTubeIframeAPIReady;
+        let settled = false;
+        let timeoutId = null;
+        let checkId = null;
+        const finish = () => {
+          if (settled || !(window.YT && window.YT.Player)) return;
+          settled = true;
+          if (timeoutId) clearTimeout(timeoutId);
+          if (checkId) clearInterval(checkId);
+          isYTApiReady = true;
+          resolve();
+        };
+        window.onYouTubeIframeAPIReady = function () {
+          try {
+            if (typeof previousCallback === 'function') previousCallback();
+          } catch (err) { console.warn('YouTube callback:', err); }
+          finish();
+        };
+        // API script đã được khai báo trong <head>; nếu nó chưa tải xong thì chờ callback.
+        timeoutId = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          if (checkId) clearInterval(checkId);
+          ytLoadPromise = null;
+          reject(new Error('YouTube IFrame API không phản hồi.'));
+        }, 15000);
+        checkId = setInterval(finish, 150);
+      });
+      return ytLoadPromise;
     }
 
     function playMediaContent(title, mediaUrl, docs) {
-      document.getElementById('mediaPlayerContainer').style.display = 'block';
-      document.getElementById('currentLessonTitle').innerText = title;
-      currentLessonInfo = { title, mediaUrl };
-      loadLessonPersonalNotes();
-
+      const requestId = ++activeVideoRequest;
+      const container = document.getElementById('mediaPlayerContainer');
       const ytDiv = document.getElementById('ytPlayerDiv');
       const html5Video = document.getElementById('html5VideoPlayer');
       const fallbackIframe = document.getElementById('fallbackIframePlayer');
 
-      // Reset tất cả player trước khi load mới
-      ytDiv.style.display = 'none';
-      html5Video.style.display = 'none';
-      fallbackIframe.style.display = 'none';
-      ytDiv.innerHTML = '';
-      html5Video.src = '';
-      fallbackIframe.src = '';
+      container.style.display = 'block';
+      document.getElementById('currentLessonTitle').innerText = title || 'Bài giảng';
+      currentLessonInfo = { title, mediaUrl };
+      loadLessonPersonalNotes();
+
+      // Dừng bài cũ và hủy vòng lặp cập nhật tiến trình.
+      clearInterval(progressInterval);
       if (ytPlayerInstance && typeof ytPlayerInstance.destroy === 'function') {
-        try { ytPlayerInstance.destroy(); } catch(e) {}
+        try { ytPlayerInstance.destroy(); } catch (e) { console.warn(e); }
       }
       ytPlayerInstance = null;
+      ytDiv.innerHTML = '';
+      ytDiv.style.display = 'none';
+      html5Video.pause();
+      html5Video.removeAttribute('src');
+      html5Video.load();
+      html5Video.style.display = 'none';
+      fallbackIframe.removeAttribute('src');
+      fallbackIframe.style.display = 'none';
 
-      const ytId = extractYouTubeId(mediaUrl);
+      const url = (mediaUrl || '').trim();
+      const ytId = extractYouTubeId(url);
+
       if (ytId) {
         ytDiv.style.display = 'block';
-        const initYT = () => {
-          try {
-            ytPlayerInstance = new YT.Player('ytPlayerDiv', {
-              videoId: ytId,
-              playerVars: {
-                'autoplay': 1,
-                'controls': 1,
-                'modestbranding': 1,
-                'rel': 0,
-                'playsinline': 1
+        waitForYouTubeAPI().then(() => {
+          // Nếu học viên đã chọn bài khác trong lúc API tải, bỏ yêu cầu cũ.
+          if (requestId !== activeVideoRequest) return;
+          ytDiv.innerHTML = '';
+          ytPlayerInstance = new YT.Player('ytPlayerDiv', {
+            width: '100%',
+            height: '100%',
+            videoId: ytId,
+            playerVars: {
+              autoplay: 0,
+              controls: 1,
+              rel: 0,
+              playsinline: 1,
+              enablejsapi: 1
+            },
+            events: {
+              onReady: function () {
+                if (requestId !== activeVideoRequest) return;
+                // Không ép autoplay: một số trình duyệt chặn phát tự động không có tiếng.
+                // Học viên có thể nhấn nút Play ngay trên trình phát YouTube.
               },
-              events: {
-                'onReady': (event) => {
-                  event.target.playVideo();
-                  startProgressLoop();
-                },
-                'onStateChange': onPlayerStateChange,
-                'onError': () => {
-                  ytDiv.style.display = 'none';
-                  fallbackIframe.style.display = 'block';
-                  fallbackIframe.src = `https://www.youtube.com/embed/${ytId}?autoplay=1&modestbranding=1&rel=0&playsinline=1`;
-                }
+              onStateChange: function (event) {
+                if (requestId !== activeVideoRequest) return;
+                onPlayerStateChange(event);
+              },
+              onError: function (event) {
+                if (requestId !== activeVideoRequest) return;
+                console.error('YouTube Player error:', event.data, 'Video ID:', ytId);
+                ytDiv.style.display = 'none';
+                fallbackIframe.style.display = 'block';
+                fallbackIframe.src = 'https://www.youtube-nocookie.com/embed/' +
+                  encodeURIComponent(ytId) + '?playsinline=1&rel=0';
+                showYouTubePlaybackMessage(event.data);
               }
-            });
-          } catch(e) {
-            ytDiv.style.display = 'none';
-            fallbackIframe.style.display = 'block';
-            fallbackIframe.src = `https://www.youtube.com/embed/${ytId}?autoplay=1&modestbranding=1&rel=0&playsinline=1`;
-          }
-        };
-
-        if (typeof YT !== 'undefined' && YT.Player) {
-          initYT();
-        } else {
-          window.onYouTubeIframeAPIReady = () => {
-            isYTApiReady = true;
-            initYT();
-          };
-        }
-      } else if (mediaUrl.match(/\.(mp4|webm|ogg|mov)$/i) || mediaUrl.startsWith('blob:') || mediaUrl.startsWith('data:')) {
+            }
+          });
+        }).catch(error => {
+          if (requestId !== activeVideoRequest) return;
+          console.error(error);
+          ytDiv.style.display = 'none';
+          fallbackIframe.style.display = 'block';
+          fallbackIframe.src = 'https://www.youtube.com/embed/' +
+            encodeURIComponent(ytId) + '?playsinline=1&rel=0';
+          showYouTubePlaybackMessage('API');
+        });
+      } else if (/\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(url) || url.startsWith('blob:') || url.startsWith('data:')) {
         html5Video.style.display = 'block';
-        html5Video.src = mediaUrl;
-        html5Video.play().catch(() => {});
-      } else {
+        html5Video.src = url;
+        html5Video.play().catch(error => console.warn('Trình duyệt chặn autoplay:', error));
+      } else if (url) {
         fallbackIframe.style.display = 'block';
-        fallbackIframe.src = mediaUrl.replace('/view', '/preview');
+        fallbackIframe.src = url.replace('/view', '/preview');
+      } else {
+        alert('Bài giảng chưa có đường dẫn video. Vui lòng báo Admin cập nhật.');
       }
 
+      // Giữ nguyên chức năng hiển thị tài liệu đính kèm.
       const docsList = document.getElementById('lessonDocsList');
       const docsContainer = document.getElementById('lessonDocsContainer');
       docsList.innerHTML = '';
       if (docs && docs.length > 0) {
         docsContainer.style.display = 'block';
         docs.forEach(d => {
-          docsList.innerHTML += `
-            <div style="display:flex; gap:8px;">
-              <button class="ctrl-btn" style="background: var(--bg-hover); border:none; padding:8px 14px; border-radius:10px; color:#fff; cursor:pointer;" onclick="openEmbeddedDoc('${d.docUrl}', '${d.docName}')">📄 ${d.docName}</button>
-              <a href="${d.docUrl}" target="_blank" download class="ctrl-btn" style="background: var(--accent-green); text-decoration:none; color:#000; font-weight:700; padding:8px 14px; border-radius:10px;">📥 Tải</a>
-            </div>
-          `;
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;gap:8px;';
+          const viewButton = document.createElement('button');
+          viewButton.className = 'ctrl-btn';
+          viewButton.textContent = '📄 ' + (d.docName || 'Tài liệu');
+          viewButton.addEventListener('click', () => openEmbeddedDoc(d.docUrl, d.docName));
+          const downloadLink = document.createElement('a');
+          downloadLink.href = d.docUrl || '#';
+          downloadLink.target = '_blank';
+          downloadLink.rel = 'noopener noreferrer';
+          downloadLink.textContent = '📥 Tải';
+          row.append(viewButton, downloadLink);
+          docsList.appendChild(row);
         });
-      } else { docsContainer.style.display = 'none'; }
+      } else {
+        docsContainer.style.display = 'none';
+      }
 
-      window.scrollTo({ top: document.getElementById('mediaPlayerContainer').offsetTop - 20, behavior: 'smooth' });
+      window.scrollTo({ top: container.offsetTop - 20, behavior: 'smooth' });
+    }
+
+    function showYouTubePlaybackMessage(code) {
+      const messages = {
+        2: 'Đường dẫn hoặc mã video YouTube không hợp lệ.',
+        5: 'Trình phát HTML5 gặp lỗi khi phát video.',
+        100: 'Video không tồn tại, đã bị xóa hoặc đặt ở chế độ riêng tư.',
+        101: 'Chủ video không cho phép nhúng video vào website.',
+        150: 'Chủ video không cho phép nhúng video vào website.',
+        153: 'YouTube không nhận được thông tin nguồn giới thiệu (Referer). Hãy kiểm tra website đang mở bằng đúng tên miền GitHub Pages và không bật chính sách chặn Referer.',
+        API: 'Không tải được YouTube Player API. Hãy kiểm tra kết nối mạng hoặc tiện ích chặn quảng cáo.'
+      };
+      console.warn(messages[code] || 'Không thể phát video YouTube. Mã lỗi: ' + code);
     }
 
     function onPlayerStateChange(event) { if (event.data == YT.PlayerState.PLAYING) startProgressLoop(); }
