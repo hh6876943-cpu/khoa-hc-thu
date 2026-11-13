@@ -204,6 +204,16 @@
 
 
 
+    /* Chặn click/touch vào iframe/video, không che thanh điều khiển nằm bên ngoài media-wrapper. */
+    .video-interaction-shield {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      background: transparent;
+      pointer-events: auto;
+      cursor: default;
+      touch-action: none;
+    }
     .watermark-overlay {
       position: absolute; top: 15%; left: 10%; pointer-events: none; z-index: 40;
       color: rgba(255, 255, 255, 0.32); font-size: 1.05rem; font-weight: 800; letter-spacing: 1.5px;
@@ -550,12 +560,13 @@
               <div class="media-column">
                 <div class="media-wrapper" id="mediaWrapper">
                   <div id="ytPlayerDiv"></div>
-                  <video id="html5VideoPlayer" controls playsinline style="display:none; position:absolute; inset:0; width:100%; height:100%; background:#000; z-index:5;"></video>
+                  <video id="html5VideoPlayer" playsinline style="display:none; position:absolute; inset:0; width:100%; height:100%; background:#000; z-index:5;"></video>
                   <iframe id="fallbackIframePlayer" style="display:none; position:absolute; inset:0; width:100%; height:100%; border:none; z-index:5;"
                     allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
                     referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
-                  
 
+                  <!-- Lớp phủ trong suốt chặn thao tác trực tiếp trên video; điều khiển qua thanh bên dưới -->
+                  <div class="video-interaction-shield" id="videoInteractionShield" aria-hidden="true"></div>
                   <div class="watermark-overlay" id="watermarkOverlay"><span id="watermarkText">VACT EDU WATERMARK</span></div>
                 </div>
 
@@ -2374,7 +2385,7 @@
             videoId: ytId,
             playerVars: {
               autoplay: 0,
-              controls: 1,
+              controls: 0,
               rel: 0,
               playsinline: 1,
               enablejsapi: 1
@@ -2395,7 +2406,7 @@
                 ytDiv.style.display = 'none';
                 fallbackIframe.style.display = 'block';
                 fallbackIframe.src = 'https://www.youtube-nocookie.com/embed/' +
-                  encodeURIComponent(ytId) + '?playsinline=1&rel=0';
+                  encodeURIComponent(ytId) + '?playsinline=1&rel=0&controls=0';
                 showYouTubePlaybackMessage(event.data);
               }
             }
@@ -2406,7 +2417,7 @@
           ytDiv.style.display = 'none';
           fallbackIframe.style.display = 'block';
           fallbackIframe.src = 'https://www.youtube.com/embed/' +
-            encodeURIComponent(ytId) + '?playsinline=1&rel=0';
+            encodeURIComponent(ytId) + '?playsinline=1&rel=0&controls=0';
           showYouTubePlaybackMessage('API');
         });
       } else if (/\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(url) || url.startsWith('blob:') || url.startsWith('data:')) {
