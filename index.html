@@ -2331,31 +2331,61 @@
       const guardOverlay = wrapper.querySelector('.video-guard-overlay');
       const ytId = extractYouTubeId(mediaUrl);
 
+      let youtubeReadyTimer = null;
       const showYouTubeFallback = () => {
+        if (youtubeReadyTimer) {
+          clearTimeout(youtubeReadyTimer);
+          youtubeReadyTimer = null;
+        }
         const currentFrame = document.getElementById('fallbackIframePlayer');
         const currentGuard = wrapper.querySelector('.video-guard-overlay');
+        const controls = document.getElementById('customControls');
+        const playerDiv = document.getElementById('ytPlayerDiv');
         if (!currentFrame) return;
+
+        // Khi dùng iframe trực tiếp, phải tắt lớp phủ và thanh điều khiển
+        // riêng (các nút này chỉ điều khiển được YT.Player API).
         if (currentGuard) currentGuard.style.display = 'none';
+        if (controls) controls.style.display = 'none';
+        if (playerDiv) playerDiv.style.display = 'none';
+
         currentFrame.style.display = 'block';
-        currentFrame.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen';
-        currentFrame.src = `https://www.youtube-nocookie.com/embed/${ytId}?autoplay=1&controls=1&modestbranding=1&rel=0&playsinline=1`;
+        currentFrame.style.visibility = 'visible';
+        currentFrame.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen';
+        currentFrame.referrerPolicy = 'strict-origin-when-cross-origin';
+        currentFrame.src = `https://www.youtube.com/embed/${ytId}?autoplay=0&controls=1&rel=0&playsinline=1`;
       };
 
       if (ytId) {
-        // Giữ nguyên thanh điều khiển riêng của VACT EDU.
         const controls = document.getElementById('customControls');
         if (controls) controls.style.display = 'flex';
+
         if (typeof YT !== 'undefined' && YT.Player) {
           try {
+            // Nếu API không phát tín hiệu onReady, tự chuyển sang iframe thường.
+            youtubeReadyTimer = setTimeout(showYouTubeFallback, 7000);
             ytPlayerInstance = new YT.Player('ytPlayerDiv', {
               videoId: ytId,
               playerVars: {
-                autoplay: 1, controls: 0, modestbranding: 1, rel: 0,
-                playsinline: 1, enablejsapi: 1, origin: window.location.origin,
-                vq: 'hd1080'
+                autoplay: 0, controls: 1, modestbranding: 1, rel: 0,
+                playsinline: 1, enablejsapi: 1, origin: window.location.origin
               },
               events: {
-                onReady: function(event) { event.target.playVideo(); },
+                onReady: function(event) {
+                  if (youtubeReadyTimer) {
+                    clearTimeout(youtubeReadyTimer);
+                    youtubeReadyTimer = null;
+                  }
+                  // Không ép tự phát: tránh bị trình duyệt/webview chặn.
+                  const player = event.target;
+                  if (player && player.getIframe) {
+                    const frame = player.getIframe();
+                    if (frame) {
+                      frame.style.width = '100%';
+                      frame.style.height = '100%';
+                    }
+                  }
+                },
                 onStateChange: onPlayerStateChange,
                 onError: showYouTubeFallback
               }
@@ -2365,7 +2395,7 @@
             showYouTubeFallback();
           }
         } else {
-          // API chưa tải hoặc bị trình duyệt chặn: dùng iframe YouTube trực tiếp.
+          // API chưa tải/bị chặn: dùng iframe YouTube trực tiếp.
           showYouTubeFallback();
         }
       } else if (mediaUrl && (/\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(mediaUrl) || mediaUrl.startsWith('blob:') || mediaUrl.startsWith('data:'))) {
