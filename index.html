@@ -2274,6 +2274,15 @@
       else { if (document.exitFullscreen) document.exitFullscreen(); }
     }
 
+    let pendingYouTubeVideoId = null;
+    window.onYouTubeIframeAPIReady = function() {
+      if (pendingYouTubeVideoId) {
+        const vid = pendingYouTubeVideoId;
+        pendingYouTubeVideoId = null;
+        initYouTubePlayerInstance(vid);
+      }
+    };
+
     function extractYouTubeId(url) {
       if (!url || typeof url !== 'string') return null;
       const value = url.trim();
@@ -2294,7 +2303,88 @@
         }
         return /^[a-zA-Z0-9_-]{11}$/.test(id) ? id : null;
       } catch (_) {
-        return null;
+        const match = value.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/|live\/|v\/))([a-zA-Z0-9_-]{11})/);
+        return match ? match[1] : null;
+      }
+    }
+
+    function initYouTubePlayerInstance(ytId) {
+      const wrapper = document.getElementById('mediaWrapper');
+      if (!wrapper) return;
+
+      let youtubeReadyTimer = setTimeout(() => {
+        const currentFrame = document.getElementById('fallbackIframePlayer');
+        const currentGuard = wrapper.querySelector('.video-guard-overlay');
+        const controls = document.getElementById('customControls');
+        const playerDiv = document.getElementById('ytPlayerDiv');
+        if (!currentFrame) return;
+
+        if (currentGuard) currentGuard.style.display = 'none';
+        if (controls) controls.style.display = 'none';
+        if (playerDiv) playerDiv.style.display = 'none';
+
+        currentFrame.style.display = 'block';
+        currentFrame.style.visibility = 'visible';
+        currentFrame.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen';
+        currentFrame.referrerPolicy = 'strict-origin-when-cross-origin';
+        currentFrame.src = `https://www.youtube.com/embed/${ytId}?autoplay=1&controls=1&rel=0&modestbranding=1&playsinline=1`;
+      }, 6000);
+
+      try {
+        ytPlayerInstance = new YT.Player('ytPlayerDiv', {
+          videoId: ytId,
+          playerVars: {
+            autoplay: 1,
+            controls: 0,
+            modestbranding: 1,
+            rel: 0,
+            showinfo: 0,
+            iv_load_policy: 3,
+            playsinline: 1,
+            enablejsapi: 1,
+            origin: window.location.origin
+          },
+          events: {
+            onReady: function(event) {
+              if (youtubeReadyTimer) {
+                clearTimeout(youtubeReadyTimer);
+                youtubeReadyTimer = null;
+              }
+              const player = event.target;
+              if (player && player.getIframe) {
+                const frame = player.getIframe();
+                if (frame) {
+                  frame.style.width = '100%';
+                  frame.style.height = '100%';
+                  frame.style.border = 'none';
+                }
+              }
+              if (player && typeof player.playVideo === 'function') {
+                player.playVideo();
+              }
+            },
+            onStateChange: onPlayerStateChange,
+            onError: function() {
+              if (youtubeReadyTimer) {
+                clearTimeout(youtubeReadyTimer);
+                youtubeReadyTimer = null;
+              }
+              const currentFrame = document.getElementById('fallbackIframePlayer');
+              const currentGuard = wrapper.querySelector('.video-guard-overlay');
+              const controls = document.getElementById('customControls');
+              const playerDiv = document.getElementById('ytPlayerDiv');
+              if (currentGuard) currentGuard.style.display = 'none';
+              if (controls) controls.style.display = 'none';
+              if (playerDiv) playerDiv.style.display = 'none';
+              if (currentFrame) {
+                currentFrame.style.display = 'block';
+                currentFrame.src = `https://www.youtube.com/embed/${ytId}?autoplay=1&controls=1&rel=0&playsinline=1`;
+              }
+            }
+          }
+        });
+      } catch (err) {
+        console.warn('YT.Player init error:', err);
       }
     }
 
@@ -2310,6 +2400,7 @@
         try { ytPlayerInstance.destroy(); } catch (_) {}
       }
       ytPlayerInstance = null;
+      pendingYouTubeVideoId = null;
       if (typeof progressInterval !== 'undefined') clearInterval(progressInterval);
 
       const watermarkText = document.getElementById('watermarkText');
@@ -2322,84 +2413,29 @@
         <div class="watermark-overlay" id="watermarkOverlay"><span id="watermarkText">${watermarkValue}</span></div>
       `;
 
-      const ytDiv = document.getElementById('ytPlayerDiv');
       const html5Video = document.getElementById('html5VideoPlayer');
       const fallbackIframe = document.getElementById('fallbackIframePlayer');
       const guardOverlay = wrapper.querySelector('.video-guard-overlay');
+      const controls = document.getElementById('customControls');
       const ytId = extractYouTubeId(mediaUrl);
 
-      let youtubeReadyTimer = null;
-      const showYouTubeFallback = () => {
-        if (youtubeReadyTimer) {
-          clearTimeout(youtubeReadyTimer);
-          youtubeReadyTimer = null;
-        }
-        const currentFrame = document.getElementById('fallbackIframePlayer');
-        const currentGuard = wrapper.querySelector('.video-guard-overlay');
-        const controls = document.getElementById('customControls');
-        const playerDiv = document.getElementById('ytPlayerDiv');
-        if (!currentFrame) return;
-
-        if (currentGuard) currentGuard.style.display = 'none';
-        if (controls) controls.style.display = 'none';
-        if (playerDiv) playerDiv.style.display = 'none';
-
-        currentFrame.style.display = 'block';
-        currentFrame.style.visibility = 'visible';
-        currentFrame.allow = 'accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen';
-        currentFrame.referrerPolicy = 'strict-origin-when-cross-origin';
-        currentFrame.src = `https://www.youtube.com/embed/${ytId}?autoplay=0&controls=1&rel=0&playsinline=1`;
-      };
-
       if (ytId) {
-        const controls = document.getElementById('customControls');
         if (controls) controls.style.display = 'flex';
+        if (guardOverlay) guardOverlay.style.display = 'block';
 
         if (typeof YT !== 'undefined' && YT.Player) {
-          try {
-            youtubeReadyTimer = setTimeout(showYouTubeFallback, 7000);
-            ytPlayerInstance = new YT.Player('ytPlayerDiv', {
-              videoId: ytId,
-              playerVars: {
-                autoplay: 0, controls: 1, modestbranding: 1, rel: 0,
-                playsinline: 1, enablejsapi: 1, origin: window.location.origin
-              },
-              events: {
-                onReady: function(event) {
-                  if (youtubeReadyTimer) {
-                    clearTimeout(youtubeReadyTimer);
-                    youtubeReadyTimer = null;
-                  }
-                  const player = event.target;
-                  if (player && player.getIframe) {
-                    const frame = player.getIframe();
-                    if (frame) {
-                      frame.style.width = '100%';
-                      frame.style.height = '100%';
-                    }
-                  }
-                },
-                onStateChange: onPlayerStateChange,
-                onError: showYouTubeFallback
-              }
-            });
-          } catch (error) {
-            console.warn('YouTube Player API error, falling back to iframe.', error);
-            showYouTubeFallback();
-          }
+          initYouTubePlayerInstance(ytId);
         } else {
-          showYouTubeFallback();
+          pendingYouTubeVideoId = ytId;
         }
       } else if (mediaUrl && (/\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(mediaUrl) || mediaUrl.startsWith('blob:') || mediaUrl.startsWith('data:'))) {
         if (guardOverlay) guardOverlay.style.display = 'none';
-        const controls = document.getElementById('customControls');
         if (controls) controls.style.display = 'none';
         html5Video.style.display = 'block';
         html5Video.src = mediaUrl;
         html5Video.play().catch(() => {});
       } else {
         if (guardOverlay) guardOverlay.style.display = 'none';
-        const controls = document.getElementById('customControls');
         if (controls) controls.style.display = 'none';
         fallbackIframe.style.display = 'block';
         fallbackIframe.src = (mediaUrl || '').replace('/view', '/preview');
