@@ -61,7 +61,11 @@
       inset: 0;
       z-index: 20;
       background: transparent;
+      pointer-events: auto;
       user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+      cursor: default;
     }
     .anti-cheat-blur {
       filter: blur(18px);
@@ -2423,7 +2427,8 @@
 
                 <div id="protected-video-wrapper" class="relative aspect-video bg-black select-none">
                   ${activeVideo ? `
-                    <iframe id="lesson-video-iframe" data-video-player="lesson-video-iframe" src="${formatEmbedUrl(activeVideo.url)}" class="w-full h-full border-0" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen></iframe>
+                    <iframe id="lesson-video-iframe" data-video-player="lesson-video-iframe" src="${formatEmbedUrl(activeVideo.url)}" class="w-full h-full border-0" tabindex="-1" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen></iframe>
+                    <div class="video-shield" aria-hidden="true" title="Video được bảo vệ; sử dụng thanh điều khiển bên dưới để xem bài giảng."></div>
                   ` : `
                     <div class="w-full h-full flex items-center justify-center text-slate-400 text-sm">Bài học này chưa được gắn video bài giảng.</div>
                   `}
