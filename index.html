@@ -85,6 +85,7 @@
         visibility: visible !important;
       }
       #certificate-print-area {
+        display: block !important;
         position: fixed !important;
         left: 0 !important;
         top: 0 !important;
@@ -222,6 +223,7 @@
             <span>Đăng Nhập Hệ Thống</span>
             <i class="fa-solid fa-arrow-right"></i>
           </button>
+          <button type="button" onclick="sendEmailLoginLink()" class="w-full py-2.5 rounded-xl border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 font-bold text-xs hover:bg-indigo-50 dark:hover:bg-indigo-950"><i class="fa-solid fa-paper-plane mr-1.5"></i>Gửi liên kết đăng nhập nhanh qua email</button>
         </form>
 
         <!-- Form Đăng ký -->
@@ -273,7 +275,7 @@
           </button>
           <button type="button" onclick="openOAuthModal('Cốc Cốc')" class="py-3 px-4 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/40 dark:bg-emerald-950/40 hover:bg-emerald-50 dark:hover:bg-emerald-900/40 transition flex items-center justify-center gap-2.5 text-sm font-semibold text-emerald-800 dark:text-emerald-300">
             <span class="w-5 h-5 rounded-full bg-emerald-600 text-white text-[11px] font-extrabold flex items-center justify-center">C</span>
-            <span>Đăng nhập Cốc Cốc</span>
+            <span>Đăng nhập Google trên Cốc Cốc</span>
           </button>
         </div>
       </div>
@@ -380,6 +382,7 @@
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-app.js";
     import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-analytics.js";
     import { getDatabase, ref, set, onValue, get } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-database.js";
+    import { getAuth, GoogleAuthProvider, signInWithPopup, sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink } from "https://www.gstatic.com/firebasejs/11.0.2/firebase-auth.js";
 
     // Cấu hình Firebase chính xác theo yêu cầu
     const firebaseConfig = {
@@ -401,6 +404,7 @@
       console.warn("Firebase Analytics skipped in local/sandbox:", err.message);
     }
     const rtdb = getDatabase(app);
+    const auth = getAuth(app);
     const dbRef = ref(rtdb, 'edumaster_db_v2026');
 
     /* =========================================================================
@@ -412,12 +416,14 @@
       settings: {
         maintenanceMode: false,
         antiRightClick: false,
+        featureMaintenance: { exam: false, chat: false },
         countdowns: {
           tnthpt: '2027-06-26T07:30:00',
           vact: '2027-03-28T08:00:00',
           tsa: '2027-01-24T08:00:00'
         }
       },
+      popups: [],
       users: [
         {
           id: 'u_admin',
@@ -848,6 +854,8 @@
       if (!raw || typeof raw !== 'object') return base;
       const merged = { ...base, ...raw };
       merged.settings = { ...base.settings, ...(raw.settings || {}) };
+      merged.settings.featureMaintenance = { ...base.settings.featureMaintenance, ...((raw.settings || {}).featureMaintenance || {}) };
+      merged.popups = Array.isArray(raw.popups) ? raw.popups : [];
       merged.users = Array.isArray(raw.users) ? raw.users.map(u => ({
         ...u,
         allowedCourses: Array.isArray(u.allowedCourses) ? u.allowedCourses : [],
@@ -860,6 +868,8 @@
       // Chuẩn hóa 4 cấp độ khóa học
       merged.courses = Array.isArray(raw.courses) ? raw.courses.map(big => ({
         ...big,
+        audience: big.audience || '', releaseDate: big.releaseDate || '', price: big.price || '',
+        thumbnail: big.thumbnail || '',
         smallCourses: Array.isArray(big.smallCourses) ? big.smallCourses.map(sm => ({
           ...sm,
           topics: Array.isArray(sm.topics) ? sm.topics.map(tp => ({
@@ -1321,66 +1331,46 @@
       loginSuccess(newUser);
     }
 
-    function openOAuthModal(provider) {
-      const color = provider === 'Google' ? 'text-rose-600' : 'text-emerald-600';
-      openModal(
-        `<span class="${color}"><i class="fa-solid fa-shield-check mr-2"></i>Xác thực qua ${provider} OAuth 2.0</span>`,
-        `
-        <form onsubmit="submitCustomOAuth(event, '${provider}')" class="space-y-3.5 text-center">
-          <p class="text-xs text-slate-600 dark:text-slate-300">Nhập thông tin tài khoản <b>${provider}</b> của bạn để đăng nhập hoặc tạo tài khoản liên kết:</p>
-          <div>
-            <label class="block text-xs font-bold uppercase text-slate-500 mb-1">Họ và tên hiển thị</label>
-            <input id="oauth-name" required placeholder="Nguyễn Văn A" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-center" />
-          </div>
-          <div>
-            <label class="block text-xs font-bold uppercase text-slate-500 mb-1">Địa chỉ Email ${provider}</label>
-            <input id="oauth-email" type="email" required placeholder="email@gmail.com" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-center" />
-          </div>
-          <button type="submit" class="w-full py-3 rounded-xl bg-indigo-600 text-white font-bold text-sm hover:bg-indigo-700">Tiếp tục với ${provider}</button>
-        </form>
-        `,
-        'max-w-md'
-      );
+    async function openOAuthModal(provider) {
+      try {
+        const credential = await signInWithPopup(auth, new GoogleAuthProvider());
+        const fu = credential.user;
+        let user = DB.users.find(u => (u.email||'').toLowerCase() === (fu.email||'').toLowerCase());
+        if (!user) {
+          user = { id:'firebase_'+fu.uid, name:fu.displayName||fu.email.split('@')[0], email:fu.email, role:'student', phone:'', school:'', target:'', avatar:fu.photoURL||`https://ui-avatars.com/api/?name=${encodeURIComponent(fu.displayName||fu.email)}`, status:'active', online:true, points:100, badges:['Google'], allowedCourses:[], unlockedLibraryIds:[], unlockedLiveIds:[], analytics:{weeklyStudyHours:[0,0,0,0,0,0,0],examScores:[],courseTimeDistribution:{},webAccessMinutes:[0,0,0,0,0,0,0]}, scheduleEvents:[], authProvider:'google', firebaseUid:fu.uid };
+          DB.users.push(user);
+        }
+        if (user.status==='locked') { showToast('Tài khoản đang bị khóa.','error'); return; }
+        saveDB(); loginSuccess(user);
+      } catch (err) {
+        console.error('Google sign-in:',err);
+        showToast(err.code==='auth/popup-closed-by-user'?'Bạn đã đóng cửa sổ đăng nhập.':`Không thể đăng nhập Google: ${err.message}`,'error');
+      }
     }
 
-    function submitCustomOAuth(e, provider) {
-      e.preventDefault();
-      const name = document.getElementById('oauth-name').value.trim();
-      const email = document.getElementById('oauth-email').value.trim().toLowerCase();
-      closeModal();
-      let user = DB.users.find(u => u.email.toLowerCase() === email);
-      if (!user) {
-        user = {
-          id: 'u_' + Date.now(),
-          name,
-          email,
-          password: 'oauth_' + Math.random().toString(36).slice(2, 8),
-          role: 'student',
-          phone: '',
-          school: `Liên kết ${provider}`,
-          target: 'Chinh phục kỳ thi 2026',
-          avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=0ea5e9&color=fff&bold=true`,
-          status: 'active',
-          online: true,
-          points: 100,
-          badges: [`Tài khoản ${provider}`],
-          allowedCourses: [],
-          unlockedLibraryIds: ['lib_1'],
-          unlockedLiveIds: ['live_1'],
-          analytics: {
-            weeklyStudyHours: [1, 1, 1, 1, 1, 1, 1],
-            examScores: [],
-            courseTimeDistribution: { 'Chưa phân quyền khóa học': 1 },
-            webAccessMinutes: [10, 15, 10, 20, 15, 25, 20]
-          },
-          scheduleEvents: []
-        };
-        DB.users.push(user);
-        addAuditLog(name, `Đăng ký mới qua ${provider} OAuth`);
-      }
-      saveDB();
-      showToast(`Đăng nhập qua ${provider} thành công!`, 'success');
-      loginSuccess(user);
+    async function sendEmailLoginLink() {
+      const email = document.getElementById('login-email').value.trim().toLowerCase();
+      if (!email) { showToast('Nhập email trước khi gửi liên kết đăng nhập.','warning'); return; }
+      try {
+        await sendSignInLinkToEmail(auth,email,{url:window.location.href.split('?')[0],handleCodeInApp:true});
+        localStorage.setItem('EDUMASTER_EMAIL_LINK',email);
+        showToast('Đã gửi liên kết đăng nhập. Hãy mở email và nhấn liên kết trên cùng thiết bị.','success');
+      } catch(err) { showToast(`Không gửi được email đăng nhập: ${err.message}`,'error'); }
+    }
+
+    async function completeEmailLinkSignIn() {
+      if (!isSignInWithEmailLink(auth,window.location.href)) return;
+      let email=localStorage.getItem('EDUMASTER_EMAIL_LINK');
+      if (!email) email=prompt('Nhập lại địa chỉ email đã nhận liên kết đăng nhập:');
+      if (!email) return;
+      try {
+        const result=await signInWithEmailLink(auth,email,window.location.href);
+        localStorage.removeItem('EDUMASTER_EMAIL_LINK');
+        let user=DB.users.find(u=>(u.email||'').toLowerCase()===email.toLowerCase());
+        if(!user){user={id:'firebase_'+result.user.uid,name:email.split('@')[0],email,role:'student',phone:'',school:'',target:'',avatar:`https://ui-avatars.com/api/?name=${encodeURIComponent(email)}`,status:'active',online:true,points:100,badges:['Email xác thực'],allowedCourses:[],unlockedLibraryIds:[],unlockedLiveIds:[],analytics:{weeklyStudyHours:[0,0,0,0,0,0,0],examScores:[],courseTimeDistribution:{},webAccessMinutes:[0,0,0,0,0,0,0]},scheduleEvents:[],authProvider:'email-link',firebaseUid:result.user.uid};DB.users.push(user);}
+        history.replaceState({},document.title,window.location.pathname+window.location.hash);
+        saveDB();loginSuccess(user);
+      } catch(err){showToast(`Liên kết đăng nhập không hợp lệ hoặc đã hết hạn: ${err.message}`,'error');}
     }
 
     function loginSuccess(user) {
@@ -1395,6 +1385,7 @@
       document.getElementById('app-shell').classList.add('flex');
 
       updateHeaderUI();
+      if (user.role !== 'admin') { const pop=(DB.popups||[]).find(x=>x.active && !sessionStorage.getItem('EDU_POPUP_SEEN_'+x.id)); if(pop){sessionStorage.setItem('EDU_POPUP_SEEN_'+pop.id,'1');setTimeout(()=>openPopupFrame(pop.title,pop.url),500);} }
       if (!window.location.hash || window.location.hash === '#/') {
         window.location.hash = '#/home';
       } else {
@@ -1531,6 +1522,10 @@
       activeCharts = [];
     }
 
+    function renderFeatureMaintenanceNotice(featureName) {
+      return `<section class="min-h-[52vh] flex items-center justify-center p-6"><div class="max-w-xl w-full text-center bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-800 rounded-3xl p-10 shadow-xl"><div class="mx-auto w-20 h-20 rounded-3xl bg-amber-100 dark:bg-amber-950 text-amber-600 flex items-center justify-center text-3xl mb-5"><i class="fa-solid fa-screwdriver-wrench"></i></div><h2 class="text-2xl font-extrabold mb-3">Tính năng này đang được cập nhật</h2><p class="text-sm text-slate-500 dark:text-slate-400">${escapeHtml(featureName)} hiện tạm khóa theo cài đặt của quản trị viên. Vui lòng quay lại sau.</p></div></section>`;
+    }
+
     function handleRoute() {
       if (!currentUser) return;
       destroyCharts();
@@ -1542,6 +1537,10 @@
       const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
       const section = parts[0] || 'home';
       const main = document.getElementById('main-content');
+      if (currentUser.role !== 'admin' && section === 'exam' && DB.settings.featureMaintenance?.exam) {
+        main.innerHTML = renderFeatureMaintenanceNotice('Phòng thi thử');
+        return;
+      }
 
       if (section !== 'live' && activeLiveRoomId) {
         cleanupLiveMedia();
@@ -2104,6 +2103,11 @@
                           <p class="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 leading-relaxed">
                             ${c.description || 'Hệ thống bài giảng 4 cấp độ bảo mật kèm tài liệu hướng dẫn chi tiết.'}
                           </p>
+                          <div class="mt-3 flex flex-wrap justify-center gap-1.5 text-[10px]">
+                            ${c.audience ? `<span class="px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">${escapeHtml(c.audience)}</span>` : ''}
+                            ${c.releaseDate ? `<span class="px-2 py-1 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">Phát hành: ${escapeHtml(c.releaseDate)}</span>` : ''}
+                            ${c.price ? `<span class="px-2 py-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">${escapeHtml(c.price)}</span>` : ''}
+                          </div>
                         </div>
                       </a>
                       <div class="px-5 py-4 bg-slate-50 dark:bg-slate-800/60 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
@@ -2111,6 +2115,7 @@
                           <i class="fa-solid fa-sitemap text-indigo-600 mr-1"></i>${smallList.length} khóa nhỏ • ${totalTopics} chuyên đề • ${totalLessons} bài
                         </span>
                         <div class="flex items-center gap-1.5">
+                          ${isAdmin ? `<button onclick="openEditBigCourseModal('${c.id}')" title="Chỉnh sửa khóa học lớn" class="w-8 h-8 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center"><i class="fa-solid fa-pen"></i></button>` : ''}
                           <button onclick="copyShareLink('${courseUrl}')" title="Sao chép đường dẫn riêng" class="w-8 h-8 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-indigo-600 flex items-center justify-center">
                             <i class="fa-solid fa-link text-xs"></i>
                           </button>
@@ -2698,6 +2703,12 @@
               <input id="new-big-teacher" required placeholder="Tên giảng viên..." class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
             </div>
             <input id="new-big-tkb" placeholder="Link Thời khóa biểu chung của khóa lớn (Google Sheets/Docs)..." class="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input id="new-big-audience" placeholder="Đối tượng học viên (VD: Lớp 12, ôn ĐGNL...)" class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+              <input id="new-big-release" type="date" title="Ngày phát hành" class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+              <input id="new-big-price" placeholder="Giá tiền (VD: 499.000đ hoặc Miễn phí)" class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+              <input id="new-big-image" placeholder="URL hình nền khóa học lớn" class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+            </div>
             <button type="submit" class="px-4 py-2 rounded-xl bg-indigo-600 text-white font-bold">+ Tạo Khóa Học Lớn</button>
           </form>
 
@@ -2770,6 +2781,10 @@
         badge: 'Khóa Mới 2026',
         thumbnail: 'https://images.unsplash.com/photo-1509228468518-180dd4864904?auto=format&fit=crop&w=800&q=80',
         description: 'Khóa học chuyên sâu 4 cấp độ được tạo bởi Admin',
+        audience: document.getElementById('new-big-audience')?.value.trim() || '',
+        releaseDate: document.getElementById('new-big-release')?.value || '',
+        price: document.getElementById('new-big-price')?.value.trim() || '',
+        thumbnail: document.getElementById('new-big-image')?.value.trim() || 'https://images.unsplash.com/photo-1509228468518-180dd4864904?auto=format&fit=crop&w=800&q=80',
         scheduleLink: document.getElementById('new-big-tkb').value.trim() || 'https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/preview',
         scheduleSummary: 'Lịch học cập nhật trên Thời khóa biểu đính kèm',
         smallCourses: []
@@ -4099,6 +4114,7 @@
     function renderExamPage(container, routeParts = []) {
       const isAdmin = currentUser.role === 'admin';
       const targetExamId = routeParts[0] || null;
+      if (!isAdmin && DB.settings.featureMaintenance?.exam) { container.innerHTML = renderFeatureMaintenanceNotice('Phòng thi thử'); return; }
 
       if (activeExamSession) {
         renderActiveExamInterface(container);
@@ -4114,11 +4130,14 @@
               <h1 class="text-xl font-extrabold text-slate-800 dark:text-white"><i class="fa-solid fa-shield-halved text-rose-600 mr-2"></i>Phòng Thi Thử Chuẩn Cấu Trúc 2026 (Chống Gian Lận)</h1>
               <p class="text-xs text-slate-500 dark:text-slate-400 mt-1">Bắt buộc Toàn màn hình • Khóa chuột phải & phím tắt • Phát hiện chuyển tab • Cấp Giấy chứng nhận</p>
             </div>
-            ${isAdmin ? `
+            <div class="flex flex-wrap items-center justify-center gap-2">
+              <button onclick="openExamLeaderboard()" class="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold shadow"><i class="fa-solid fa-ranking-star mr-1.5"></i>Bảng xếp hạng</button>
+              ${isAdmin ? `
               <button onclick="openCreateExamModal()" class="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow">
                 <i class="fa-solid fa-plus mr-1.5"></i>Tạo Đề Thi Mới
               </button>
-            ` : ''}
+              ` : ''}
+            </div>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -4136,9 +4155,15 @@
                       </div>
                     </div>
                     <h3 class="text-base font-extrabold text-slate-800 dark:text-white mb-2">${ex.title}</h3>
-                    <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">Cấu trúc: Trắc nghiệm 4 phương án, Đúng/Sai 4 ý (cộng/trừ điểm linh hoạt), Trả lời ngắn.</p>
+                    <p class="text-xs text-slate-500 dark:text-slate-400 mb-2">${escapeHtml(ex.description || 'Cấu trúc: Trắc nghiệm 4 phương án, Đúng/Sai 4 ý, Trả lời ngắn.')}</p>
+                    <div class="text-[11px] text-slate-500 mb-2">${ex.examType === 'vact' ? 'Dạng VACT' : 'Dạng TN THPT'} • ${Number(ex.maxAttempts || 0) ? `Tối đa ${ex.maxAttempts} lượt` : 'Không giới hạn lượt'} • ${ex.allowedUserIds?.length ? 'Có phân quyền' : 'Mở cho học viên'}</div>
+                    ${ex.roomCode ? `<div class="inline-flex px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 text-[11px] font-bold mb-2">Mã phòng: ${escapeHtml(ex.roomCode)}</div>` : ''}
+                    ${ex.scheduleAt ? `<div class="text-[11px] text-slate-500 mb-2"><i class="fa-regular fa-calendar mr-1"></i>${escapeHtml(ex.scheduleAt)}</div>` : ''}
                   </div>
-                  <div class="space-y-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                    ${ex.examDocUrl ? `<button onclick="openExamResourceModal('${ex.id}','exam')" class="py-2 rounded-xl bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 text-xs font-bold"><i class="fa-regular fa-file-pdf mr-1"></i>Xem đề trong web</button>` : ''}
+                    ${ex.answerDocUrl ? `<button onclick="openExamResourceModal('${ex.id}','answer')" class="py-2 rounded-xl bg-emerald-50 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 text-xs font-bold"><i class="fa-solid fa-book-open mr-1"></i>Tài liệu chữa</button>` : ''}
+                    ${ex.solutionVideoUrl ? `<button onclick="openExamResourceModal('${ex.id}','video')" class="py-2 rounded-xl bg-violet-50 dark:bg-violet-950 text-violet-700 dark:text-violet-300 text-xs font-bold"><i class="fa-solid fa-circle-play mr-1"></i>Video chữa đề</button>` : ''}
                     <button onclick="confirmStartExam('${ex.id}')" class="w-full py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white text-xs font-bold shadow">
                       <i class="fa-solid fa-play mr-1.5"></i>Bắt Đầu Làm Bài Thi (Chế độ Toàn màn hình)
                     </button>
@@ -4149,6 +4174,7 @@
             }).join('')}
           </div>
 
+          ${isAdmin ? `<div class="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm"><h2 class="text-base font-extrabold mb-3">Thống kê kết quả theo từng đề</h2><div class="overflow-x-auto"><table class="w-full text-xs"><thead><tr class="text-left bg-slate-50 dark:bg-slate-800"><th class="p-2">Đề thi</th><th class="p-2">Lượt nộp</th><th class="p-2">Điểm TB</th><th class="p-2">Cao nhất</th></tr></thead><tbody>${DB.exams.map(ex => { const ss=DB.examSubmissions.filter(x=>x.examId===ex.id); const vals=ss.map(x=>Number(x.scale10)||0); const avg=vals.length?(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2):'—'; return `<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-2 font-bold">${escapeHtml(ex.title)}</td><td class="p-2">${ss.length}</td><td class="p-2">${avg}</td><td class="p-2">${vals.length?Math.max(...vals).toFixed(2):'—'}</td></tr>`; }).join('')}</tbody></table></div></div>` : ''}
           <div class="bg-white dark:bg-slate-900 rounded-3xl p-6 border border-slate-200 dark:border-slate-800 shadow-sm">
             <h2 class="text-base font-extrabold text-slate-800 dark:text-white mb-4 text-center sm:text-left"><i class="fa-solid fa-award text-amber-500 mr-2"></i>Lịch Sử Nộp Bài, Đáp Án Chi Tiết & Giấy Chứng Nhận</h2>
             <div class="overflow-x-auto">
@@ -4186,6 +4212,9 @@
     function confirmStartExam(examId) {
       const exam = DB.exams.find(e => e.id === examId);
       if (!exam) return;
+      if (exam.openToAll === false && !(exam.allowedUserIds || []).includes(currentUser.id) && currentUser.role !== 'admin') { showToast('Bạn chưa được phân quyền tham gia đề thi này.', 'error'); return; }
+      const attempts = DB.examSubmissions.filter(x=>x.examId===examId && x.userId===currentUser.id).length;
+      if (Number(exam.maxAttempts||0)>0 && attempts>=Number(exam.maxAttempts) && currentUser.role!=='admin') { showToast('Bạn đã sử dụng hết số lần thi cho phép.', 'error'); return; }
       openModal('⚠️ Quy Chế Phòng Thi Chống Gian Lận', `
         <div class="space-y-4 text-xs text-slate-600 dark:text-slate-300 text-center">
           <div class="p-4 rounded-2xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 space-y-1.5 text-left">
@@ -4402,10 +4431,9 @@
           ['a', 'b', 'c', 'd'].forEach(k => {
             if (userAns[k] && userAns[k] === q.answer[k]) correctSubs += 1;
           });
-          if (correctSubs === 4) rawScore += Number(q.pointsPlus);
-          else if (correctSubs === 3) rawScore += Number(q.pointsPlus) * 0.5;
-          else if (correctSubs === 2) rawScore += Number(q.pointsPlus) * 0.25;
-          else if (correctSubs === 1) rawScore += Number(q.pointsPlus) * 0.1;
+          if (exam.examType === 'tnthpt' || q.section === 2) {
+            rawScore += ({1:0.1,2:0.25,3:0.5,4:1}[correctSubs] || 0);
+          } else if (correctSubs === 4) rawScore += Number(q.pointsPlus);
           else rawScore -= Number(q.pointsMinus || 0);
         }
       });
@@ -4425,6 +4453,8 @@
         scale10,
         timeSpentSec: spentSec,
         violations,
+        answers: JSON.parse(JSON.stringify(answers)),
+        details: exam.questions.map(q=>({questionId:q.id, label:q.label, correctAnswer:q.answer, studentAnswer:answers[q.id] ?? null, type:q.type})),
         submittedAt: new Date().toLocaleString('vi-VN')
       };
 
@@ -4438,6 +4468,20 @@
       showToast(autoSubmitted ? `Hết giờ! Đã tự động chấm điểm: ${scale10}/10` : `Nộp bài thành công! Điểm của bạn: ${scale10}/10`, 'success');
       handleRoute();
       viewExamReviewModal(newSub.id);
+    }
+
+    function openExamResourceModal(examId, kind) {
+      const ex = DB.exams.find(x => x.id === examId);
+      if (!ex) return;
+      const config = { exam: ['Đề thi', ex.examDocUrl], answer: ['Tài liệu đáp án & chữa đề', ex.answerDocUrl], video: ['Video chữa đề', ex.solutionVideoUrl] }[kind];
+      if (!config || !config[1]) { showToast('Tài nguyên này chưa được Admin cập nhật.', 'warning'); return; }
+      const src = formatEmbedUrl(config[1]);
+      openModal(`${escapeHtml(ex.title)} — ${config[0]}`, `<div class="space-y-3"><div class="flex flex-wrap justify-between items-center gap-2 text-xs text-slate-500"><span>${escapeHtml(config[0])} • Hiển thị trực tiếp trên EduMaster Pro</span><a href="${escapeHtml(config[1])}" target="_blank" rel="noopener" class="px-3 py-2 rounded-lg bg-indigo-600 text-white font-bold">Mở tab mới <i class="fa-solid fa-arrow-up-right-from-square ml-1"></i></a></div><iframe src="${escapeHtml(src)}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen class="w-full h-[76vh] min-h-[520px] rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-100"></iframe></div>`, 'max-w-7xl');
+    }
+
+    function openExamLeaderboard() {
+      const rows = [...DB.examSubmissions].sort((a,b) => Number(b.scale10||0)-Number(a.scale10||0) || String(a.submittedAt||'').localeCompare(String(b.submittedAt||''))).slice(0,100);
+      openModal('Bảng xếp hạng thi thử toàn hệ thống', `<div class="space-y-4"><div class="grid grid-cols-3 gap-3 text-center"><div class="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950"><div class="text-xs text-amber-700 dark:text-amber-300">Lượt dự thi</div><b class="text-2xl">${DB.examSubmissions.length}</b></div><div class="p-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950"><div class="text-xs text-indigo-700 dark:text-indigo-300">Thí sinh</div><b class="text-2xl">${new Set(DB.examSubmissions.map(x=>x.userId)).size}</b></div><div class="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950"><div class="text-xs text-emerald-700 dark:text-emerald-300">Đề thi</div><b class="text-2xl">${new Set(DB.examSubmissions.map(x=>x.examId)).size}</b></div></div><div class="max-h-[70vh] overflow-auto rounded-2xl border border-slate-200 dark:border-slate-700"><table class="w-full text-sm"><thead class="sticky top-0 bg-slate-100 dark:bg-slate-800"><tr><th class="p-3 text-left">Hạng</th><th class="p-3 text-left">Thí sinh</th><th class="p-3 text-left">Đề thi</th><th class="p-3 text-right">Điểm</th><th class="p-3 text-left">Thời gian nộp</th></tr></thead><tbody>${rows.map((x,i)=>`<tr class="border-t border-slate-100 dark:border-slate-800"><td class="p-3 font-extrabold ${i<3?'text-amber-500':''}">${i+1}</td><td class="p-3 font-bold">${escapeHtml(x.userName)}</td><td class="p-3">${escapeHtml(x.examTitle)}</td><td class="p-3 text-right font-extrabold text-emerald-600">${Number(x.scale10||0).toFixed(2)}</td><td class="p-3 text-xs text-slate-500">${escapeHtml(x.submittedAt||'')}</td></tr>`).join('') || '<tr><td colspan="5" class="p-8 text-center text-slate-400">Chưa có kết quả thi.</td></tr>'}</tbody></table></div><p class="text-[11px] text-slate-500">Bảng xếp hạng tổng hợp theo điểm thang 10 từ các lượt nộp đã lưu.</p></div>`, 'max-w-7xl');
     }
 
     function viewExamReviewModal(submId) {
@@ -4461,18 +4505,22 @@
             </div>
           </div>
 
+          <div class="rounded-2xl border border-slate-200 dark:border-slate-700 p-4 space-y-2">
+            <div class="font-bold text-sm">Đáp án từng câu và câu trả lời của bạn</div>
+            ${(sub.details || []).map(d=>`<div class="text-xs p-2 rounded-lg bg-slate-50 dark:bg-slate-800"><b>${escapeHtml(d.label||('Câu '+d.questionId))}</b><div>Đáp án: <span class="text-emerald-600 font-bold">${escapeHtml(typeof d.correctAnswer==='object'?Object.entries(d.correctAnswer).map(([k,v])=>k+': '+v).join(' • '):String(d.correctAnswer??''))}</span></div><div>Bạn chọn: ${escapeHtml(typeof d.studentAnswer==='object'?Object.entries(d.studentAnswer).map(([k,v])=>k+': '+v).join(' • '):String(d.studentAnswer??'Chưa trả lời'))}</div></div>`).join('')}
+          </div>
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div class="rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700">
               <div class="px-3 py-2 bg-slate-100 dark:bg-slate-800 text-xs font-bold">1. Tài liệu đáp án & giải chi tiết</div>
-              <div class="h-64"><iframe src="${formatEmbedUrl(exam.answerDocUrl)}" class="w-full h-full border-0"></iframe></div>
+              <div class="h-[68vh] min-h-[460px]"><iframe src="${formatEmbedUrl(exam.answerDocUrl)}" class="w-full h-full border-0"></iframe></div>
             </div>
             <div class="rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700">
               <div class="px-3 py-2 bg-slate-100 dark:bg-slate-800 text-xs font-bold">2. Video chữa đề chi tiết</div>
-              <div class="h-64"><iframe src="${formatEmbedUrl(exam.solutionVideoUrl)}" class="w-full h-full border-0"></iframe></div>
+              <div class="h-[68vh] min-h-[460px] relative"><iframe src="${formatEmbedUrl(exam.solutionVideoUrl)}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen class="w-full h-full border-0"></iframe><button onclick="openVideoZoom('${escapeHtml(exam.solutionVideoUrl||'')}')" class="absolute right-2 bottom-2 px-3 py-1.5 rounded-lg bg-slate-900/85 text-white text-xs font-bold">Phóng to video</button></div>
             </div>
           </div>
         </div>
-      `, 'max-w-4xl');
+      `, 'max-w-7xl');
     }
 
     function openCertificateModal(submId) {
@@ -4503,58 +4551,82 @@
             </button>
           </div>
         </div>
-      `, 'max-w-3xl');
+      `, 'max-w-6xl');
     }
 
     function openCreateExamModal() {
-      openModal('Tạo Đề Thi Thử Chuẩn 2026 Mới', `
-        <form onsubmit="saveNewExam(event)" class="space-y-3.5 text-xs">
-          <div>
-            <label class="block font-bold text-slate-500 uppercase mb-1">Tên đề thi thử</label>
-            <input id="ex-new-title" required placeholder="VD: Đề Thi Thử Vật Lý 12 Lần 2" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm" />
+      openModal('Tạo Đề Thi Thử Chi Tiết', `
+        <form onsubmit="saveNewExam(event)" class="space-y-3 text-xs">
+          <input id="ex-new-title" required placeholder="Tên bài kiểm tra" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <select id="ex-new-type" class="px-3 py-2 rounded-xl border bg-white dark:bg-slate-800"><option value="tnthpt">TN THPT</option><option value="vact">VACT (điểm riêng từng câu)</option></select>
+            <input id="ex-new-dur" type="number" min="1" required value="45" placeholder="Thời lượng (phút)" class="px-3 py-2 rounded-xl border bg-white dark:bg-slate-800" />
+            <input id="ex-new-attempts" type="number" min="0" value="0" placeholder="Số lần thi (0 = không giới hạn)" class="px-3 py-2 rounded-xl border bg-white dark:bg-slate-800" />
+            <input id="ex-new-desc" placeholder="Mô tả / đối tượng được thi" class="px-3 py-2 rounded-xl border bg-white dark:bg-slate-800" />
+            <input id="ex-new-room" placeholder="Tên / mã phòng thi (VD: EDU-MATH-01)" class="px-3 py-2 rounded-xl border bg-white dark:bg-slate-800" />
+            <input id="ex-new-schedule" type="datetime-local" class="px-3 py-2 rounded-xl border bg-white dark:bg-slate-800" title="Lịch mở phòng (tùy chọn)" />
           </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block font-bold text-slate-500 uppercase mb-1">Thời gian làm bài (phút)</label>
-              <input id="ex-new-dur" type="number" required value="45" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm" />
-            </div>
-            <div>
-              <label class="block font-bold text-slate-500 uppercase mb-1">Link Video chữa đề</label>
-              <input id="ex-new-vid" required value="https://www.youtube.com/embed/M7lc1UVf-VE" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm" />
-            </div>
+          <input id="ex-new-doc" required placeholder="Link đề thi (URL)" class="w-full px-3 py-2 rounded-xl border bg-white dark:bg-slate-800" />
+          <input id="ex-new-ans" required placeholder="Link đáp án / tài liệu chữa" class="w-full px-3 py-2 rounded-xl border bg-white dark:bg-slate-800" />
+          <input id="ex-new-vid" placeholder="Link video chữa đề (YouTube/Drive)" class="w-full px-3 py-2 rounded-xl border bg-white dark:bg-slate-800" />
+          <div class="p-3 rounded-xl bg-slate-50 dark:bg-slate-800 space-y-2">
+            <b>Phân quyền học sinh</b>
+            <label class="flex gap-2 items-center"><input type="checkbox" id="ex-new-open" checked /> Tất cả học viên đang hoạt động</label>
+            <div class="max-h-28 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1">${DB.users.filter(u=>u.role==='student').map(u=>`<label class="flex gap-2 items-center"><input type="checkbox" class="ex-allowed-user" value="${u.id}" /> ${escapeHtml(u.name)}</label>`).join('')}</div>
           </div>
-          <div>
-            <label class="block font-bold text-slate-500 uppercase mb-1">Link File Đề Thi (Google Docs/Drive)</label>
-            <input id="ex-new-doc" required value="https://docs.google.com/document/d/1/preview" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm" />
+          <div class="p-3 rounded-xl border border-indigo-200 dark:border-indigo-800 space-y-2">
+            <b>Phần I — Trắc nghiệm ABCD</b>
+            <input id="ex-count-mcq" type="number" min="0" value="1" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-900" placeholder="Số câu phần I" />
+            <textarea id="ex-answers-mcq" rows="3" placeholder="Mỗi dòng một câu: đáp án đúng (A/B/C/D). Ví dụ:\nA\nC\nB" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-900"></textarea>
+            <textarea id="ex-labels-mcq" rows="2" placeholder="Nội dung từng câu (mỗi dòng một câu, có thể để trống)" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-900"></textarea>
           </div>
-          <div>
-            <label class="block font-bold text-slate-500 uppercase mb-1">Link File Đáp Án Chi Tiết</label>
-            <input id="ex-new-ans" required value="https://docs.google.com/document/d/1/preview" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm" />
+          <div class="p-3 rounded-xl border border-emerald-200 dark:border-emerald-800 space-y-2">
+            <b>Phần II — Đúng / Sai (mỗi dòng 4 ý a,b,c,d)</b>
+            <input id="ex-count-tf" type="number" min="0" value="1" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-900" placeholder="Số câu phần II" />
+            <textarea id="ex-answers-tf" rows="3" placeholder="Mỗi dòng 4 đáp án, phân cách dấu phẩy. Ví dụ:\nĐúng,Sai,Đúng,Sai" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-900"></textarea>
+            <p class="text-[10px] text-slate-500">Thang điểm tự động: đúng 1 ý = 0,1; đúng 2 ý = 0,25; đúng 3 ý = 0,5; đúng 4 ý = 1 điểm.</p>
           </div>
-          <button type="submit" class="w-full py-3 rounded-xl bg-indigo-600 text-white font-bold text-sm">Xuất Bản Đề Thi</button>
+          <div class="p-3 rounded-xl border border-amber-200 dark:border-amber-800 space-y-2">
+            <b>Phần III — Trả lời ngắn</b>
+            <input id="ex-count-short" type="number" min="0" value="1" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-900" placeholder="Số câu phần III" />
+            <textarea id="ex-answers-short" rows="3" placeholder="Mỗi dòng một đáp án chính xác. Ví dụ:\n1.33\n2026" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-900"></textarea>
+          </div>
+          <div class="p-3 rounded-xl border border-violet-200 dark:border-violet-800 space-y-2">
+            <b>VACT — cấu hình đáp án / điểm từng câu</b>
+            <p class="text-[10px] text-slate-500">Chọn VACT ở phía trên. Mỗi dòng: đáp án|điểm cộng|điểm trừ. Có thể dùng đáp án văn bản hoặc A/B/C/D.</p>
+            <textarea id="ex-vact-lines" rows="3" placeholder="A|1|0.25\n12.5|2|0.5" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-900"></textarea>
+          </div>
+          <button type="submit" class="w-full py-3 rounded-xl bg-indigo-600 text-white font-bold">Lưu đề và đáp án chi tiết</button>
         </form>
-      `, 'max-w-lg');
+      `, 'max-w-2xl');
     }
 
     function saveNewExam(e) {
       e.preventDefault();
-      DB.exams.unshift({
-        id: 'ex_' + Date.now(),
-        title: document.getElementById('ex-new-title').value.trim(),
-        durationMinutes: Number(document.getElementById('ex-new-dur').value),
-        examDocUrl: document.getElementById('ex-new-doc').value.trim(),
-        answerDocUrl: document.getElementById('ex-new-ans').value.trim(),
-        solutionVideoUrl: document.getElementById('ex-new-vid').value.trim(),
-        questions: [
-          { id: 1, type: 'mcq', label: 'Câu 1 (Trắc nghiệm 4 phương án): Chọn đáp án đúng nhất', answer: 'B', pointsPlus: 0.25, pointsMinus: 0 },
-          { id: 2, type: 'tf', label: 'Câu 2 (Đúng / Sai 4 ý): Xét tính đúng sai các phát biểu a, b, c, d', answer: { a: 'Đúng', b: 'Đúng', c: 'Sai', d: 'Sai' }, pointsPlus: 1.0, pointsMinus: 0.25 },
-          { id: 3, type: 'short', label: 'Câu 3 (Trả lời ngắn): Nhập kết quả số', answer: '2026', pointsPlus: 0.5, pointsMinus: 0 }
-        ]
-      });
-      saveDB();
-      closeModal();
-      showToast('Đã xuất bản đề thi thử mới!', 'success');
-      handleRoute();
+      const type = document.getElementById('ex-new-type').value;
+      const title = document.getElementById('ex-new-title').value.trim();
+      const questions = [];
+      const lines = id => document.getElementById(id).value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+      const count = id => Math.max(0, Math.min(300, Number(document.getElementById(id).value)||0));
+      const mcqN=count('ex-count-mcq'), tfN=count('ex-count-tf'), shortN=count('ex-count-short');
+      try {
+      if (type === 'vact') {
+        const vlines=lines('ex-vact-lines');
+        if (!vlines.length) { showToast('Vui lòng nhập đáp án và điểm cộng/trừ từng câu VACT.', 'warning'); return; }
+        vlines.forEach((line,i)=>{ const [answer,plus,minus]=line.split('|').map(x=>x.trim()); if(!answer || !Number.isFinite(Number(plus)) || Number(plus)<=0 || !Number.isFinite(Number(minus||0)) || Number(minus||0)<0) throw new Error('Dòng VACT '+(i+1)+' không hợp lệ.'); questions.push({id:i+1,type:/^[ABCD]$/i.test(answer)?'mcq':'short',label:`Câu ${i+1} — VACT`,answer:/^[ABCD]$/i.test(answer)?answer.toUpperCase():answer,pointsPlus:Number(plus),pointsMinus:Number(minus||0)}); });
+      } else {
+        const mcq=lines('ex-answers-mcq'), tf=lines('ex-answers-tf'), sh=lines('ex-answers-short');
+        if(mcq.length!==mcqN || tf.length!==tfN || sh.length!==shortN){ showToast('Số dòng đáp án phải khớp số câu đã khai báo ở từng phần.', 'error'); return; }
+        const ml=lines('ex-labels-mcq');
+        mcq.forEach((a,i)=>{if(!/^[ABCD]$/i.test(a)) throw new Error(`Đáp án phần I câu ${i+1} phải là A/B/C/D.`);questions.push({id:questions.length+1,type:'mcq',section:1,label:ml[i]||`Câu ${i+1} — Phần I`,answer:a.toUpperCase(),pointsPlus:0.25,pointsMinus:0});});
+        tf.forEach((line,i)=>{const a=line.split(',').map(x=>x.trim());if(a.length!==4 || a.some(x=>!['đúng','sai','dung'].includes(x.toLowerCase()))) throw new Error(`Câu đúng/sai ${i+1}: nhập đủ 4 ý Đúng/Sai, cách nhau bằng dấu phẩy.`);questions.push({id:questions.length+1,type:'tf',section:2,label:`Câu ${i+1} — Phần II`,answer:{a:a[0].toLowerCase().startsWith('đ')||a[0].toLowerCase()==='dung'?'Đúng':'Sai',b:a[1].toLowerCase().startsWith('đ')||a[1].toLowerCase()==='dung'?'Đúng':'Sai',c:a[2].toLowerCase().startsWith('đ')||a[2].toLowerCase()==='dung'?'Đúng':'Sai',d:a[3].toLowerCase().startsWith('đ')||a[3].toLowerCase()==='dung'?'Đúng':'Sai'},pointsPlus:1,pointsMinus:0});});
+        sh.forEach((a,i)=>questions.push({id:questions.length+1,type:'short',section:3,label:`Câu ${i+1} — Phần III`,answer:a,pointsPlus:0.5,pointsMinus:0}));
+      }
+      } catch (err) { showToast(err.message || 'Đáp án không hợp lệ.','error'); return; }
+      const allowed = Array.from(document.querySelectorAll('.ex-allowed-user:checked')).map(x=>x.value);
+      const isOpen = document.getElementById('ex-new-open').checked;
+      DB.exams.unshift({id:'ex_'+Date.now(),title,durationMinutes:Math.max(1,Number(document.getElementById('ex-new-dur').value)||1),examDocUrl:document.getElementById('ex-new-doc').value.trim(),answerDocUrl:document.getElementById('ex-new-ans').value.trim(),solutionVideoUrl:document.getElementById('ex-new-vid').value.trim(),description:document.getElementById('ex-new-desc').value.trim(),roomCode:document.getElementById('ex-new-room').value.trim(),scheduleAt:document.getElementById('ex-new-schedule').value,examType:type,maxAttempts:Math.max(0,Number(document.getElementById('ex-new-attempts').value)||0),openToAll:isOpen,allowedUserIds:isOpen?[]:allowed,questions});
+      saveDB(); closeModal(); showToast('Đã tạo đề thi cùng đáp án từng câu.', 'success'); handleRoute();
     }
 
     function deleteExam(id) {
@@ -4655,17 +4727,16 @@
 
           <!-- Cột Phải (5 cột): Nhắn tin 1-1 -->
           <div class="lg:col-span-5">
-            <div class="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col h-[660px] sticky top-20">
-              <div class="p-4 border-b border-slate-100 dark:border-slate-800 bg-indigo-50/60 dark:bg-indigo-950/50 rounded-t-3xl">
-                <div class="text-xs font-extrabold text-indigo-800 dark:text-indigo-300 uppercase mb-1">
-                  <i class="fa-solid fa-lock mr-1"></i>Kênh Nhắn Tin Riêng Tư 1-1
-                </div>
+            ${(!isAdmin && DB.settings.featureMaintenance?.chat) ? renderFeatureMaintenanceNotice('Chat 1-1') : `
+            <div class="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col h-[720px] sticky top-20 overflow-hidden">
+              <div class="p-5 border-b border-slate-100 dark:border-slate-800 bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 text-white">
+                <div class="flex items-center justify-between gap-3"><div><div class="text-sm font-extrabold uppercase tracking-wide"><i class="fa-solid fa-comments mr-2"></i>EduMaster Direct</div><div class="text-[11px] text-indigo-100 mt-1">Kênh trao đổi riêng tư • Đồng bộ thời gian thực</div></div><span class="px-2.5 py-1 rounded-full bg-white/15 text-[10px] font-bold"><i class="fa-solid fa-circle text-emerald-300 mr-1"></i>Trực tuyến</span></div>
                 ${isAdmin ? `
                   <select onchange="window._adminChatTarget=this.value; handleRoute();" class="w-full mt-1 px-3 py-2 rounded-xl border border-indigo-200 dark:border-indigo-700 bg-white dark:bg-slate-800 text-xs font-bold">
                     ${students.map(s => `<option value="${s.id}" ${s.id === selectedChatPartnerId ? 'selected' : ''}>Trò chuyện với: ${s.name} (${s.email})</option>`).join('')}
                   </select>
                 ` : `
-                  <div class="text-sm font-extrabold text-slate-900 dark:text-white">Trò chuyện trực tiếp với Admin</div>
+                  <div class="text-sm font-extrabold text-white">Trò chuyện trực tiếp với Admin</div>
                 `}
               </div>
 
@@ -4675,8 +4746,8 @@
                   return `
                     <div class="flex flex-col ${isMine ? 'items-end' : 'items-start'}">
                       <div class="max-w-[82%] px-4 py-2.5 rounded-2xl text-xs ${isMine ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-bl-none'}">
-                        <div class="font-bold text-[10px] opacity-80 mb-0.5">${m.fromName} • ${m.time}</div>
-                        <div>${m.text}</div>
+                        <div class="font-bold text-[10px] opacity-80 mb-0.5">${escapeHtml(m.fromName)} • ${escapeHtml(m.time)}</div>
+                        <div class="whitespace-pre-wrap break-words">${escapeHtml(m.text)}</div>
                       </div>
                     </div>
                   `;
@@ -4684,12 +4755,14 @@
               </div>
 
               ${partner ? `
-                <form onsubmit="sendDirectMessage(event, '${partner.id}')" class="p-3 border-t border-slate-100 dark:border-slate-800 flex gap-2">
-                  <input id="dm-text-input" required placeholder="Nhập tin nhắn riêng tư..." class="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs outline-none" />
-                  <button type="submit" class="px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700">Gửi</button>
+                <form onsubmit="sendDirectMessage(event, '${partner.id}')" class="p-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900">
+                  <div class="flex gap-2 items-end"><textarea id="dm-text-input" required rows="2" maxlength="2000" placeholder="Viết tin nhắn... (Enter để gửi, Shift+Enter xuống dòng)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();this.form.requestSubmit();}" class="flex-1 resize-none px-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm outline-none focus:border-indigo-500"></textarea>
+                  <button type="submit" class="h-11 px-5 rounded-2xl bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-xs font-extrabold shadow-lg hover:shadow-indigo-500/25"><i class="fa-solid fa-paper-plane mr-1"></i>Gửi</button></div>
+                  <div class="text-[10px] text-slate-400 mt-2">Tin nhắn chỉ hiển thị giữa hai tài khoản trong cuộc trò chuyện này.</div>
                 </form>
               ` : ''}
             </div>
+            `}
           </div>
         </div>
       `;
@@ -4748,18 +4821,13 @@
     function sendDirectMessage(e, toId) {
       e.preventDefault();
       const input = document.getElementById('dm-text-input');
-      if (!input.value.trim()) return;
+      const message = String(input?.value || '').trim().slice(0, 2000);
+      const recipient = DB.users.find(u => u.id === toId);
+      if (!message || !recipient || toId === currentUser.id) return;
+      if (currentUser.role !== 'admin' && recipient.role !== 'admin') { showToast('Bạn chỉ có thể nhắn tin trực tiếp với Admin.', 'warning'); return; }
       const now = new Date();
-      DB.directMessages.push({
-        id: 'dm_' + Date.now(),
-        fromId: currentUser.id,
-        fromName: currentUser.name,
-        toId,
-        text: input.value.trim(),
-        time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`
-      });
+      DB.directMessages.push({ id: 'dm_' + Date.now() + '_' + Math.random().toString(36).slice(2,7), fromId: currentUser.id, fromName: currentUser.name, toId, text: message, attachment: '', time: `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`, sentAt: now.toISOString(), read: false });
       saveDB();
-      input.value = '';
       handleRoute();
     }
 
@@ -4805,7 +4873,7 @@
             </div>
 
             <div class="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-3">
-              <h3 class="text-sm font-extrabold text-slate-800 dark:text-white">Lịch Sử Phiếu Báo Cáo (${visibleReports.length})</h3>
+              <div class="flex items-center justify-between gap-2"><h3 class="text-sm font-extrabold text-slate-800 dark:text-white">Lịch Sử Phiếu Báo Cáo (${visibleReports.length})</h3>${isAdmin ? `<button onclick="openCreateReportModal()" class="px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-bold">+ Thêm báo cáo</button>` : ''}</div>
               ${visibleReports.map(r => `
                 <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-1.5 text-xs">
                   <div class="flex items-center justify-between">
@@ -4813,8 +4881,11 @@
                     <span class="px-2.5 py-0.5 rounded-full font-bold ${r.status === 'Đã xử lý' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}">${r.status}</span>
                   </div>
                   <p class="text-slate-600 dark:text-slate-300">${r.content}</p>
-                  ${isAdmin && r.status !== 'Đã xử lý' ? `
-                    <button onclick="resolveReport('${r.id}')" class="mt-1 px-3 py-1 rounded-lg bg-emerald-600 text-white font-bold">Đánh dấu Đã xử lý</button>
+                  ${isAdmin ? `
+                    <div class="flex flex-wrap gap-2 pt-2">
+                      <button onclick="openEditReportModal('${r.id}')" class="px-3 py-1 rounded-lg bg-indigo-100 text-indigo-700 font-bold">Sửa / cập nhật trạng thái</button>
+                      <button onclick="deleteReport('${r.id}')" class="px-3 py-1 rounded-lg bg-rose-100 text-rose-700 font-bold">Xóa</button>
+                    </div>
                   ` : ''}
                 </div>
               `).join('')}
@@ -4850,6 +4921,10 @@
                       </form>
                     `}
                     ${isAdmin ? `
+                      <div class="flex gap-2 pt-2">
+                        <button onclick="openEditSurveyModal('${s.id}')" class="px-3 py-1 rounded-lg bg-indigo-100 text-indigo-700 font-bold">Sửa khảo sát</button>
+                        <button onclick="deleteSurvey('${s.id}')" class="px-3 py-1 rounded-lg bg-rose-100 text-rose-700 font-bold">Xóa khảo sát</button>
+                      </div>
                       <div class="pt-2 border-t border-indigo-200/70 dark:border-indigo-800 text-xs">
                         <div class="font-bold text-indigo-800 dark:text-indigo-300 mb-1">Tổng hợp phản hồi (${s.responses.length} học sinh):</div>
                         ${s.responses.map(r => `<div class="p-2 rounded bg-white/80 dark:bg-slate-900 mb-1"><b>${r.userName}:</b> ${r.answers.join(' | ')}</div>`).join('')}
@@ -4883,7 +4958,7 @@
 
     function resolveReport(repId) {
       const rep = DB.reports.find(r => r.id === repId);
-      if (rep) rep.status = 'Đã xử lý';
+      if (rep) { rep.status = 'Đã xử lý'; rep.updatedAt = new Date().toLocaleString('vi-VN'); rep.adminNote = rep.adminNote || 'Đã xử lý'; }
       saveDB();
       handleRoute();
     }
@@ -5095,6 +5170,30 @@
     /* =========================================================================
        16. BẢNG ĐIỀU KHIỂN ADMIN TỐI CAO (#/admin)
     ========================================================================= */
+    function safePopupUrl(value) {
+      try { const u=new URL(String(value||'')); return ['http:','https:'].includes(u.protocol) ? u.href : ''; } catch (_) { return ''; }
+    }
+    function openPopupEditor(id) {
+      if(currentUser?.role!=='admin') return;
+      const p=(DB.popups||[]).find(x=>x.id===id)||{};
+      openModal(id?'Sửa Popup':'Thêm Popup',`<form onsubmit="savePopup(event,'${id||''}')" class="space-y-3 text-xs"><input id="popup-title" required value="${escapeHtml(p.title||'')}" placeholder="Tên popup" class="w-full px-3 py-2 rounded-xl border bg-white dark:bg-slate-800"/><input id="popup-url" type="url" required value="${escapeHtml(p.url||'')}" placeholder="https://..." class="w-full px-3 py-2 rounded-xl border bg-white dark:bg-slate-800"/><label class="flex gap-2 items-center"><input id="popup-active" type="checkbox" ${p.active===false?'':'checked'}/> Bật popup cho học viên</label><button class="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-bold">Lưu popup</button></form>`,'max-w-lg');
+    }
+    function savePopup(e,id){e.preventDefault();if(currentUser?.role!=='admin')return;const url=safePopupUrl(document.getElementById('popup-url').value);if(!url){showToast('Chỉ chấp nhận link http/https hợp lệ.','error');return;}DB.popups=DB.popups||[];const p={id:id||'pop_'+Date.now(),title:document.getElementById('popup-title').value.trim(),url,active:document.getElementById('popup-active').checked};const i=DB.popups.findIndex(x=>x.id===id);if(i>=0)DB.popups[i]=p;else DB.popups.unshift(p);saveDB();closeModal();handleRoute();}
+    function deletePopup(id){if(currentUser?.role!=='admin'||!confirm('Xóa popup này?'))return;DB.popups=(DB.popups||[]).filter(x=>x.id!==id);saveDB();handleRoute();}
+    function previewPopup(id){const p=(DB.popups||[]).find(x=>x.id===id);if(p)openPopupFrame(p.title,p.url);}
+    function openPopupFrame(title,url){const safe=safePopupUrl(url);if(!safe){showToast('Link popup không hợp lệ.','error');return;}openModal(escapeHtml(title||'Nội dung nhúng'),`<div class="space-y-2"><iframe src="${escapeHtml(safe)}" title="${escapeHtml(title||'Popup')}" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" class="w-full h-[72vh] border-0 rounded-xl bg-white"></iframe><div class="text-[11px] text-slate-500">Nếu website đích không cho phép nhúng, hãy mở link ở tab mới.</div><div class="flex justify-end"><button onclick="window.open('${escapeHtml(safe)}','_blank','noopener,noreferrer')" class="px-3 py-2 rounded-lg bg-slate-800 text-white">Mở tab mới</button></div></div>`,'max-w-5xl');}
+    function openEditBigCourseModal(id){if(currentUser?.role!=='admin')return;const c=DB.courses.find(x=>x.id===id);if(!c)return;openModal('Chỉnh sửa thẻ khóa học lớn',`<form onsubmit="saveBigCourseEdit(event,'${id}')" class="space-y-3 text-xs"><input id="bc-title" required value="${escapeHtml(c.title)}" placeholder="Tên khóa" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-800"/><input id="bc-teacher" value="${escapeHtml(c.teacher||'')}" placeholder="Giảng viên" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-800"/><textarea id="bc-desc" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-800" placeholder="Mô tả">${escapeHtml(c.description||'')}</textarea><input id="bc-audience" value="${escapeHtml(c.audience||'')}" placeholder="Đối tượng học viên" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-800"/><input id="bc-image" type="url" value="${escapeHtml(c.thumbnail||'')}" placeholder="URL hình nền" class="w-full px-3 py-2 rounded-lg border bg-white dark:bg-slate-800"/><div class="grid grid-cols-2 gap-2"><input id="bc-date" type="date" value="${escapeHtml(c.releaseDate||'')}" class="px-3 py-2 rounded-lg border bg-white dark:bg-slate-800"/><input id="bc-price" value="${escapeHtml(c.price||'')}" placeholder="Giá tiền" class="px-3 py-2 rounded-lg border bg-white dark:bg-slate-800"/></div><div class="p-3 rounded-lg bg-slate-50 dark:bg-slate-800">Số khóa nhỏ: ${(c.smallCourses||[]).length} • Chuyên đề: ${(c.smallCourses||[]).reduce((n,x)=>n+(x.topics||[]).length,0)} • Bài học: ${(c.smallCourses||[]).reduce((n,x)=>n+(x.topics||[]).reduce((m,t)=>m+(t.lessons||[]).length,0),0)}<div class="text-[10px] text-slate-500 mt-1">Số lượng được tính trực tiếp từ dữ liệu 4 cấp, không nhập số ảo.</div></div><button class="w-full py-2.5 rounded-lg bg-indigo-600 text-white font-bold">Lưu thay đổi</button></form>`,'max-w-xl');}
+    function saveBigCourseEdit(e,id){e.preventDefault();const c=DB.courses.find(x=>x.id===id);if(!c||currentUser?.role!=='admin')return;c.title=document.getElementById('bc-title').value.trim();c.teacher=document.getElementById('bc-teacher').value.trim();c.description=document.getElementById('bc-desc').value.trim();c.audience=document.getElementById('bc-audience').value.trim();c.thumbnail=document.getElementById('bc-image').value.trim();c.releaseDate=document.getElementById('bc-date').value;c.price=document.getElementById('bc-price').value.trim();saveDB();closeModal();handleRoute();}
+    function openVideoZoom(url){const safe=safePopupUrl(url);if(!safe)return;openModal('Video chữa đề — chế độ phóng to',`<iframe src="${escapeHtml(formatEmbedUrl(safe))}" allowfullscreen class="w-full h-[78vh] border-0 rounded-xl"></iframe>`,'max-w-6xl');}
+    function openCreateReportModal(){if(currentUser?.role!=='admin')return;openModal('Tạo phiếu báo cáo / ghi nhận nội bộ',`<form onsubmit="createAdminReport(event)" class="space-y-3 text-xs"><input id="admin-rep-name" placeholder="Tên người gửi / đối tượng liên quan" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800"/><input id="admin-rep-type" required placeholder="Loại báo cáo" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800"/><select id="admin-rep-priority" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800"><option>Bình thường</option><option>Khẩn cấp</option></select><textarea id="admin-rep-content" required rows="4" placeholder="Nội dung" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800"></textarea><select id="admin-rep-status" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800">${['Chờ Admin xử lý','Đã tiếp nhận','Đang xử lý','Chờ người gửi bổ sung','Đã xử lý','Từ chối'].map(x=>`<option>${x}</option>`).join('')}</select><button class="w-full py-2 rounded-lg bg-indigo-600 text-white font-bold">Tạo báo cáo</button></form>`,'max-w-lg');}
+    function createAdminReport(e){e.preventDefault();if(currentUser?.role!=='admin')return;DB.reports.unshift({id:'rep_'+Date.now(),userId:currentUser.id,userName:document.getElementById('admin-rep-name').value.trim()||currentUser.name,type:document.getElementById('admin-rep-type').value.trim(),priority:document.getElementById('admin-rep-priority').value,content:document.getElementById('admin-rep-content').value.trim(),status:document.getElementById('admin-rep-status').value,createdAt:new Date().toLocaleString('vi-VN'),createdByAdmin:true});saveDB();closeModal();handleRoute();}
+    function openEditReportModal(id){if(currentUser?.role!=='admin')return;const r=DB.reports.find(x=>x.id===id);if(!r)return;openModal('Cập nhật phiếu báo cáo',`<form onsubmit="saveReportEdit(event,'${id}')" class="space-y-3 text-xs"><select id="rep-edit-status" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800">${['Chờ Admin xử lý','Đã tiếp nhận','Đang xử lý','Chờ người gửi bổ sung','Đã xử lý','Từ chối'].map(x=>`<option ${r.status===x?'selected':''}>${x}</option>`).join('')}</select><textarea id="rep-edit-content" rows="4" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800">${escapeHtml(r.content||'')}</textarea><textarea id="rep-edit-note" rows="3" placeholder="Ghi chú / phản hồi của Admin" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800">${escapeHtml(r.adminNote||'')}</textarea><button class="w-full py-2 rounded-lg bg-indigo-600 text-white font-bold">Lưu cập nhật</button></form>`,'max-w-lg');}
+    function saveReportEdit(e,id){e.preventDefault();const r=DB.reports.find(x=>x.id===id);if(!r||currentUser?.role!=='admin')return;r.status=document.getElementById('rep-edit-status').value;r.content=document.getElementById('rep-edit-content').value.trim();r.adminNote=document.getElementById('rep-edit-note').value.trim();r.updatedAt=new Date().toLocaleString('vi-VN');saveDB();closeModal();handleRoute();}
+    function deleteReport(id){if(currentUser?.role!=='admin'||!confirm('Xóa báo cáo này?'))return;DB.reports=DB.reports.filter(x=>x.id!==id);saveDB();handleRoute();}
+    function openEditSurveyModal(id){if(currentUser?.role!=='admin')return;const s=DB.surveys.find(x=>x.id===id);if(!s)return;openModal('Chỉnh sửa khảo sát',`<form onsubmit="saveSurveyEdit(event,'${id}')" class="space-y-3"><input id="sur-edit-title" value="${escapeHtml(s.title)}" required class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800"/><textarea id="sur-edit-desc" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800">${escapeHtml(s.description||'')}</textarea><textarea id="sur-edit-questions" rows="5" class="w-full p-2 rounded-lg border bg-white dark:bg-slate-800" placeholder="Mỗi dòng một câu hỏi">${escapeHtml((s.questions||[]).join('\n'))}</textarea><button class="w-full py-2 rounded-lg bg-indigo-600 text-white font-bold">Lưu khảo sát</button></form>`,'max-w-lg');}
+    function saveSurveyEdit(e,id){e.preventDefault();const s=DB.surveys.find(x=>x.id===id);if(!s||currentUser?.role!=='admin')return;s.title=document.getElementById('sur-edit-title').value.trim();s.description=document.getElementById('sur-edit-desc').value.trim();s.questions=document.getElementById('sur-edit-questions').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);saveDB();closeModal();handleRoute();}
+    function deleteSurvey(id){if(currentUser?.role!=='admin'||!confirm('Xóa khảo sát và phản hồi của khảo sát này?'))return;DB.surveys=DB.surveys.filter(x=>x.id!==id);saveDB();handleRoute();}
+
     function renderAdminPage(container) {
       const students = DB.users.filter(u => u.role === 'student');
 
@@ -5116,6 +5215,12 @@
               </label>
             </div>
           </div>
+
+          <section class="bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+            <div class="flex items-center justify-between gap-3"><h2 class="text-base font-extrabold"><i class="fa-solid fa-window-restore text-indigo-600 mr-2"></i>Quản lý Popup / Link nhúng trong website</h2><button onclick="openPopupEditor()" class="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold">+ Thêm popup</button></div>
+            <p class="text-xs text-slate-500">Link được mở trong cửa sổ nhúng trên website; trang quản trị không bị điều hướng. Một số website chặn iframe bằng chính sách bảo mật nên có thể không nhúng được.</p>
+            <div class="space-y-2">${(DB.popups||[]).map(p=>`<div class="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 dark:bg-slate-800"><div class="min-w-0"><b>${escapeHtml(p.title)}</b><div class="text-[11px] text-slate-500 truncate">${escapeHtml(p.url)}</div><div class="text-[10px]">${p.active?'Đang bật':'Đang tắt'}</div></div><div class="flex gap-2"><button onclick="previewPopup('${p.id}')" class="px-3 py-1 rounded-lg bg-sky-100 text-sky-700 font-bold">Mở thử</button><button onclick="openPopupEditor('${p.id}')" class="px-3 py-1 rounded-lg bg-amber-100 text-amber-800 font-bold">Sửa</button><button onclick="deletePopup('${p.id}')" class="px-3 py-1 rounded-lg bg-rose-100 text-rose-700 font-bold">Xóa</button></div></div>`).join('')||'<p class="text-xs text-slate-400">Chưa có popup nào.</p>'}</div>
+          </section>
 
           <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
             <div class="lg:col-span-6 bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
@@ -5142,6 +5247,12 @@
                   <label class="flex items-center gap-2 font-bold cursor-pointer">
                     <input id="set-rightclick" type="checkbox" ${DB.settings.antiRightClick ? 'checked' : ''} class="accent-indigo-600" /> Chống chuột phải toàn trang
                   </label>
+                </div>
+                <div class="p-4 rounded-2xl border border-amber-200 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/30 space-y-3">
+                  <div class="font-extrabold text-amber-800 dark:text-amber-300"><i class="fa-solid fa-toggle-on mr-1"></i>Khóa / mở từng tính năng cho học sinh</div>
+                  <label class="flex items-center gap-2 font-bold cursor-pointer"><input id="set-maint-exam" type="checkbox" ${DB.settings.featureMaintenance?.exam ? 'checked' : ''} class="accent-rose-600" /> Phòng thi thử — hiển thị “Tính năng này đang được cập nhật”</label>
+                  <label class="flex items-center gap-2 font-bold cursor-pointer"><input id="set-maint-chat" type="checkbox" ${DB.settings.featureMaintenance?.chat ? 'checked' : ''} class="accent-rose-600" /> Chat 1-1 — hiển thị thông báo bảo trì</label>
+                  <p class="text-[10px] text-slate-500">Chỉ áp dụng cho học sinh; Admin vẫn truy cập để kiểm tra và quản trị.</p>
                 </div>
                 <div class="grid grid-cols-3 gap-2">
                   <div>
@@ -5373,11 +5484,15 @@
       e.preventDefault();
       DB.settings.maintenanceMode = document.getElementById('set-maint').checked;
       DB.settings.antiRightClick = document.getElementById('set-rightclick').checked;
+      DB.settings.featureMaintenance = DB.settings.featureMaintenance || { exam: false, chat: false };
+      DB.settings.featureMaintenance.exam = document.getElementById('set-maint-exam').checked;
+      DB.settings.featureMaintenance.chat = document.getElementById('set-maint-chat').checked;
       DB.settings.countdowns.tnthpt = document.getElementById('set-cd-tn').value;
       DB.settings.countdowns.vact = document.getElementById('set-cd-vact').value;
       DB.settings.countdowns.tsa = document.getElementById('set-cd-tsa').value;
       saveDB();
       showToast('Đã lưu cài đặt hệ thống!', 'success');
+      handleRoute();
     }
 
     function exportDatabaseJSON() {
@@ -5430,7 +5545,7 @@
       handleLogin,
       handleRegister,
       openOAuthModal,
-      submitCustomOAuth,
+      sendEmailLoginLink,
       logout,
       navigateTo,
       copyShareLink,
@@ -5453,6 +5568,10 @@
       saveTimestampNote,
       deleteVideoNote,
       openCourseManagerModal,
+      openEditBigCourseModal, saveBigCourseEdit,
+      openPopupEditor, savePopup, deletePopup, previewPopup,
+      openVideoZoom, openCreateReportModal, createAdminReport, openEditReportModal, saveReportEdit, deleteReport,
+      openEditSurveyModal, saveSurveyEdit, deleteSurvey,
       adminAddBigCourse,
       adminAddSmallCourse,
       adminAddTopic,
@@ -5488,6 +5607,8 @@
       recordTfAnswer,
       submitExamSession,
       viewExamReviewModal,
+      openExamResourceModal,
+      openExamLeaderboard,
       openCertificateModal,
       openCreateExamModal,
       saveNewExam,
@@ -5527,6 +5648,7 @@
     window.addEventListener('DOMContentLoaded', () => {
       initTheme();
       initFirebaseSync();
+      completeEmailLinkSignIn();
       const savedUid = sessionStorage.getItem('EDUMASTER_CURRENT_UID');
       if (savedUid) {
         const user = DB.users.find(u => u.id === savedUid);
