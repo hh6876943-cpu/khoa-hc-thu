@@ -67,6 +67,14 @@
       touch-action: none;
       cursor: default;
     }
+    .video-shield-drive {
+      inset: 0 0 auto auto;
+      width: 52px;
+      height: 52px;
+      border-radius: 0 0 0 14px;
+      background: rgba(15, 23, 42, 0.08);
+      cursor: default;
+    }
     .anti-cheat-blur {
       filter: blur(18px);
       pointer-events: none;
@@ -949,9 +957,13 @@
     const pendingYoutubePlayers = new Set();
 
     let localMediaStream = null;
+    const livePeerConnections = {};
+    const liveSignalUnsubs = {};
+    const liveRemoteStreams = {};
     let localCamEnabled = false;
     let localMicEnabled = false;
     let activeLiveRoomId = null;
+    let liveSessionId = null;
     let mediaRecorder = null;
     let recordedChunks = [];
     let isRecordingLive = false;
@@ -1438,7 +1450,7 @@
       document.getElementById('nav-user-role').textContent = currentUser.role === 'admin' ? 'Quản Trị Tối Cao' : 'Học Sinh';
       document.getElementById('nav-user-avatar').src = currentUser.avatar;
 
-      const unreadCount = DB.notifications.filter(n => !n.readBy.includes(currentUser.id)).length;
+      const unreadCount = DB.notifications.filter(n => (!n.targetUserId || n.targetUserId === currentUser.id) && !n.readBy.includes(currentUser.id)).length;
       document.getElementById('notif-badge').textContent = unreadCount;
       renderNotificationPopover();
 
@@ -1487,11 +1499,12 @@
 
     function renderNotificationPopover() {
       const list = document.getElementById('notif-popover-list');
-      if (!DB.notifications.length) {
+      const visibleNotifications = DB.notifications.filter(n => !n.targetUserId || n.targetUserId === currentUser.id);
+      if (!visibleNotifications.length) {
         list.innerHTML = `<div class="p-6 text-center text-xs text-slate-400">Chưa có thông báo nào.</div>`;
         return;
       }
-      list.innerHTML = DB.notifications.map(n => {
+      list.innerHTML = visibleNotifications.map(n => {
         const isRead = n.readBy.includes(currentUser.id);
         return `
           <div class="p-3.5 hover:bg-slate-50 dark:hover:bg-slate-800 transition ${isRead ? 'opacity-75' : 'bg-indigo-50/40 dark:bg-indigo-950/30'}">
@@ -1508,7 +1521,7 @@
 
     function markAllNotifsRead() {
       DB.notifications.forEach(n => {
-        if (!n.readBy.includes(currentUser.id)) n.readBy.push(currentUser.id);
+        if ((!n.targetUserId || n.targetUserId === currentUser.id) && !n.readBy.includes(currentUser.id)) n.readBy.push(currentUser.id);
       });
       saveDB();
       updateHeaderUI();
@@ -2428,7 +2441,7 @@
                 <div id="protected-video-wrapper" class="relative aspect-video bg-black select-none">
                   ${activeVideo ? `
                     <iframe id="lesson-video-iframe" data-video-player="lesson-video-iframe" src="${formatEmbedUrl(activeVideo.url)}" class="w-full h-full border-0" tabindex="-1" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen></iframe>
-                    <div class="video-shield" aria-hidden="true" title="Video được bảo vệ; sử dụng thanh điều khiển bên dưới để xem bài giảng."></div>
+                    <div class="video-shield ${isGoogleDriveUrl(activeVideo.url) ? 'video-shield-drive' : ''}" aria-hidden="true" title="Video được bảo vệ; sử dụng thanh điều khiển bên dưới để xem bài giảng."></div>
                   ` : `
                     <div class="w-full h-full flex items-center justify-center text-slate-400 text-sm">Bài học này chưa được gắn video bài giảng.</div>
                   `}
@@ -2533,6 +2546,10 @@
       startVideoTimer();
     }
 
+    function isGoogleDriveUrl(url) {
+      return /(^|\.)drive\.google\.com|docs\.google\.com/i.test(String(url || ''));
+    }
+
     function formatEmbedUrl(url) {
       if (!url) return '';
       let embedUrl = String(url).trim();
@@ -2544,10 +2561,18 @@
         embedUrl = `https://www.youtube.com/embed/${vid}`;
       }
       if (/youtube\.com\/embed\//i.test(embedUrl)) {
-        const join = embedUrl.includes('?') ? '&' : '?';
-        const origin = encodeURIComponent(location.origin);
-        if (!/[?&]enablejsapi=1/.test(embedUrl)) embedUrl += `${join}enablejsapi=1&origin=${origin}&playsinline=1&rel=0`;
-        return embedUrl;
+        try {
+          const parsed = new URL(embedUrl, location.href);
+          parsed.searchParams.set('enablejsapi', '1');
+          parsed.searchParams.set('origin', location.origin);
+          parsed.searchParams.set('playsinline', '1');
+          parsed.searchParams.set('rel', '0');
+          parsed.searchParams.set('widget_referrer', location.href.split('#')[0]);
+          return parsed.toString();
+        } catch (e) {
+          const join = embedUrl.includes('?') ? '&' : '?';
+          return `${embedUrl}${join}enablejsapi=1&origin=${encodeURIComponent(location.origin)}&playsinline=1&rel=0`;
+        }
       }
       if (embedUrl.includes('drive.google.com/file/d/')) return embedUrl.replace('/view', '/preview');
       return embedUrl;
@@ -2581,19 +2606,38 @@
     }
 
     function loadYoutubeIframeApi() {
-      if (window.YT && window.YT.Player) { youtubeIframeApiReady = true; return; }
+      if (window.YT && window.YT.Player) {
+        youtubeIframeApiReady = true;
+        youtubeIframeApiLoading = false;
+        return;
+      }
       if (youtubeIframeApiLoading) return;
       youtubeIframeApiLoading = true;
       const previousReady = window.onYouTubeIframeAPIReady;
       window.onYouTubeIframeAPIReady = () => {
         youtubeIframeApiReady = true;
-        if (typeof previousReady === 'function') previousReady();
+        youtubeIframeApiLoading = false;
+        if (typeof previousReady === 'function') {
+          try { previousReady(); } catch (err) { console.warn('YouTube callback:', err); }
+        }
         [...pendingYoutubePlayers].forEach(id => initYoutubeVideoPlayer(id));
       };
-      const script = document.createElement('script');
-      script.src = 'https://www.youtube.com/iframe_api';
-      script.async = true;
-      document.head.appendChild(script);
+      let script = document.querySelector('script[data-edumaster-youtube-api="1"]');
+      if (!script) {
+        script = document.createElement('script');
+        script.src = 'https://www.youtube.com/iframe_api';
+        script.async = true;
+        script.dataset.edumasterYoutubeApi = '1';
+        script.onerror = () => {
+          youtubeIframeApiLoading = false;
+          document.querySelectorAll('[id$="-provider-hint"]').forEach(el => {
+            if (el.textContent.includes('kết nối')) el.textContent = 'Không tải được YouTube Player API. Kiểm tra mạng hoặc tải lại trang.';
+          });
+          // Cho phép thử lại ở lần render/khởi tạo kế tiếp.
+          script.remove();
+        };
+        document.head.appendChild(script);
+      }
     }
 
     function initYoutubeVideoPlayer(playerId) {
@@ -2606,17 +2650,24 @@
         if (controls) controls.querySelectorAll('button,input').forEach(el => el.disabled = true);
         return;
       }
-      if (videoPlayerRegistry[playerId]?.player) return;
+      if (videoPlayerRegistry[playerId]?.player || videoPlayerRegistry[playerId]?.initializing) return;
       pendingYoutubePlayers.add(playerId);
       loadYoutubeIframeApi();
-      if (!youtubeIframeApiReady || !window.YT?.Player) return;
+      if (!youtubeIframeApiReady || !window.YT?.Player) {
+        if (hint && !hint.dataset.waiting) {
+          hint.dataset.waiting = '1';
+          hint.textContent = 'Đang tải bộ điều khiển YouTube…';
+        }
+        return;
+      }
       pendingYoutubePlayers.delete(playerId);
-      videoPlayerRegistry[playerId] = { player: null, duration: 0, current: 0, isPlaying: false, muted: false, rate: 1, volume: 100, theater: false };
+      videoPlayerRegistry[playerId] = { player: null, initializing: true, duration: 0, current: 0, isPlaying: false, muted: false, rate: 1, volume: 100, theater: false };
       videoPlayerRegistry[playerId].player = new YT.Player(iframe, {
         events: {
           onReady: event => {
             const state = videoPlayerRegistry[playerId];
             if (!state) return;
+            state.initializing = false;
             state.duration = event.target.getDuration() || 0;
             event.target.setVolume(100);
             const hintEl = document.getElementById(`${playerId}-provider-hint`);
@@ -2629,7 +2680,8 @@
             state.isPlaying = event.data === YT.PlayerState.PLAYING;
             videoSyncControlUI(playerId);
           },
-          onError: () => {
+          onError: event => {
+            if (videoPlayerRegistry[playerId]) videoPlayerRegistry[playerId].initializing = false;
             const hintEl = document.getElementById(`${playerId}-provider-hint`);
             if (hintEl) hintEl.textContent = 'Video không thể nhúng hoặc bị chủ sở hữu giới hạn phát trên website.';
           }
@@ -2879,22 +2931,42 @@
               <input id="new-les-vid-title" required placeholder="Tiêu đề video bài giảng" class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
               <input id="new-les-vid-url" required placeholder="Link Video (YouTube, Drive, FB...)" class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <input id="new-les-doc-title" placeholder="Tiêu đề tài liệu đính kèm" class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
-              <input id="new-les-doc-url" placeholder="Link tài liệu (Drive, Docs, Sheets...)" class="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800" />
+            <div class="space-y-1.5">
+              <label class="font-bold text-slate-600 dark:text-slate-300">Nhiều tài liệu đính kèm (mỗi dòng: Tên tài liệu | URL)</label>
+              <textarea id="new-les-docs" rows="3" placeholder="Tài liệu PDF | https://drive.google.com/...\nBảng công thức | https://docs.google.com/..." class="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"></textarea>
+              <p class="text-[10px] text-slate-500">Có thể bỏ trống hoặc nhập nhiều dòng; mỗi dòng gồm tên và đường dẫn, ngăn cách bằng dấu |.</p>
             </div>
             <button type="submit" class="px-4 py-2 rounded-xl bg-amber-600 text-white font-bold">+ Thêm Bài Học</button>
           </form>
 
-          <!-- QUẢN LÝ & XÓA -->
-          <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-2">
-            <div class="font-extrabold uppercase">5. Quản lý & Xóa Khóa Học Lớn</div>
+          <!-- QUẢN LÝ ĐẦY ĐỦ 5 CẤP -->
+          <div class="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-3">
+            <div class="font-extrabold uppercase text-slate-800 dark:text-white">Quản lý toàn bộ cấu trúc khóa học</div>
+            <p class="text-[10px] text-slate-500">Chỉnh sửa hoặc xóa riêng từng cấp; tài liệu nằm bên trong từng bài giảng.</p>
             ${DB.courses.map(c => `
-              <div class="p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-between">
-                <span class="font-bold">${c.title}</span>
-                <button onclick="adminDeleteBigCourse('${c.id}')" class="px-2.5 py-1 rounded-lg bg-rose-100 text-rose-700 font-bold">Xóa khóa</button>
+              <div class="rounded-2xl border border-indigo-200 dark:border-indigo-800 bg-white dark:bg-slate-900 p-3 space-y-2">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <b class="text-indigo-700 dark:text-indigo-300">${escapeHtml(c.title)}</b>
+                  <span class="flex gap-1.5"><button onclick="adminEditCourseNode('big','${c.id}')" class="px-2.5 py-1.5 rounded-lg bg-indigo-100 text-indigo-700 font-bold">Sửa</button><button onclick="adminDeleteCourseNode('big','${c.id}')" class="px-2.5 py-1.5 rounded-lg bg-rose-100 text-rose-700 font-bold">Xóa</button></span>
+                </div>
+                ${(c.smallCourses || []).map(sm => `
+                  <div class="ml-2 sm:ml-4 pl-3 border-l-2 border-sky-200 space-y-1.5">
+                    <div class="flex flex-wrap items-center justify-between gap-2"><b class="text-sky-700">${escapeHtml(sm.title)}</b><span class="flex gap-1"><button onclick="adminEditCourseNode('small','${c.id}','${sm.id}')" class="px-2 py-1 rounded bg-sky-100 text-sky-700 font-bold">Sửa</button><button onclick="adminDeleteCourseNode('small','${c.id}','${sm.id}')" class="px-2 py-1 rounded bg-rose-100 text-rose-700 font-bold">Xóa</button></span></div>
+                    ${(sm.topics || []).map(tp => `
+                      <div class="ml-2 sm:ml-4 pl-3 border-l-2 border-emerald-200 space-y-1.5">
+                        <div class="flex flex-wrap items-center justify-between gap-2"><b class="text-emerald-700">${escapeHtml(tp.title)}</b><span class="flex gap-1"><button onclick="adminEditCourseNode('topic','${c.id}','${sm.id}','${tp.id}')" class="px-2 py-1 rounded bg-emerald-100 text-emerald-700 font-bold">Sửa</button><button onclick="adminDeleteCourseNode('topic','${c.id}','${sm.id}','${tp.id}')" class="px-2 py-1 rounded bg-rose-100 text-rose-700 font-bold">Xóa</button></span></div>
+                        ${(tp.lessons || []).map(les => `
+                          <div class="ml-2 sm:ml-4 pl-3 border-l-2 border-amber-200 space-y-1.5">
+                            <div class="flex flex-wrap items-center justify-between gap-2"><b class="text-amber-700">${escapeHtml(les.title)}</b><span class="flex flex-wrap gap-1"><button onclick="adminEditCourseNode('lesson','${c.id}','${sm.id}','${tp.id}','${les.id}')" class="px-2 py-1 rounded bg-amber-100 text-amber-800 font-bold">Sửa</button><button onclick="adminAddDocumentToLesson('${c.id}','${sm.id}','${tp.id}','${les.id}')" class="px-2 py-1 rounded bg-violet-100 text-violet-700 font-bold">+ Tài liệu</button><button onclick="adminDeleteCourseNode('lesson','${c.id}','${sm.id}','${tp.id}','${les.id}')" class="px-2 py-1 rounded bg-rose-100 text-rose-700 font-bold">Xóa</button></span></div>
+                            ${(les.documents || []).map(doc => `<div class="ml-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 dark:bg-slate-800 px-2.5 py-1.5"><span>${escapeHtml(doc.title)}</span><span class="flex gap-1"><button onclick="adminEditCourseNode('doc','${c.id}','${sm.id}','${tp.id}','${les.id}','${doc.id}')" class="px-2 py-1 rounded bg-violet-100 text-violet-700 font-bold">Sửa</button><button onclick="adminDeleteCourseNode('doc','${c.id}','${sm.id}','${tp.id}','${les.id}','${doc.id}')" class="px-2 py-1 rounded bg-rose-100 text-rose-700 font-bold">Xóa</button></span></div>`).join('')}
+                          </div>
+                        `).join('')}
+                      </div>
+                    `).join('')}
+                  </div>
+                `).join('')}
               </div>
-            `).join('')}
+            `).join('') || '<p class="text-center text-slate-400 py-5">Chưa có khóa học nào.</p>'}
           </div>
         </div>
       `, 'max-w-3xl');
@@ -2975,8 +3047,13 @@
       const tp = sm && (sm.topics || []).find(t => t.id === topicId);
       if (!tp) return;
       if (!tp.lessons) tp.lessons = [];
-      const docTitle = document.getElementById('new-les-doc-title').value.trim();
-      const docUrl = document.getElementById('new-les-doc-url').value.trim();
+      const docLines = (document.getElementById('new-les-docs')?.value || '').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+      const documents = docLines.map((line, index) => {
+        const parts = line.split('|');
+        const title = (parts.shift() || '').trim();
+        const url = parts.join('|').trim();
+        return title && url ? { id: 'd_' + Date.now() + '_' + index, title, url, type: 'Tài liệu' } : null;
+      }).filter(Boolean);
       tp.lessons.push({
         id: 'les_' + Date.now(),
         title: document.getElementById('new-les-title').value.trim(),
@@ -2987,7 +3064,7 @@
           url: document.getElementById('new-les-vid-url').value.trim(),
           platform: 'Video Nhúng'
         }],
-        documents: docTitle && docUrl ? [{ id: 'd_' + Date.now(), title: docTitle, url: docUrl, type: 'Tài liệu' }] : []
+        documents
       });
       saveDB();
       closeModal();
@@ -3001,6 +3078,77 @@
       closeModal();
       showToast('Đã xóa khóa học lớn.', 'info');
       navigateTo('#/courses');
+    }
+
+    function getAdminCourseNode(bigId, smallId, topicId, lessonId, docId) {
+      const big = DB.courses.find(x => x.id === bigId);
+      const small = big && (big.smallCourses || []).find(x => x.id === smallId);
+      const topic = small && (small.topics || []).find(x => x.id === topicId);
+      const lesson = topic && (topic.lessons || []).find(x => x.id === lessonId);
+      const doc = lesson && (lesson.documents || []).find(x => x.id === docId);
+      return { big, small, topic, lesson, doc };
+    }
+
+    function adminEditCourseNode(type, bigId, smallId, topicId, lessonId, docId) {
+      if (currentUser?.role !== 'admin') return showToast('Chỉ Admin mới có quyền chỉnh sửa.', 'error');
+      const n = getAdminCourseNode(bigId, smallId, topicId, lessonId, docId);
+      const node = ({ big:n.big, small:n.small, topic:n.topic, lesson:n.lesson, doc:n.doc })[type];
+      if (!node) return showToast('Không tìm thấy mục cần sửa.', 'error');
+      const newTitle = prompt('Nhập tên mới:', node.title || '');
+      if (newTitle === null) return;
+      if (!newTitle.trim()) return showToast('Tên không được để trống.', 'warning');
+      node.title = newTitle.trim();
+      if (type === 'big') {
+        const teacher = prompt('Tên giảng viên:', n.big.teacher || '');
+        if (teacher !== null) n.big.teacher = teacher.trim();
+      } else if (type === 'small') {
+        const desc = prompt('Mô tả khóa học nhỏ:', n.small.description || '');
+        if (desc !== null) n.small.description = desc.trim();
+      } else if (type === 'topic') {
+        const desc = prompt('Mô tả chuyên đề:', n.topic.description || '');
+        if (desc !== null) n.topic.description = desc.trim();
+      } else if (type === 'lesson') {
+        const duration = prompt('Thời lượng bài giảng:', n.lesson.duration || '');
+        if (duration !== null) n.lesson.duration = duration.trim();
+      } else if (type === 'doc') {
+        const url = prompt('Đường dẫn tài liệu:', n.doc.url || '');
+        if (url !== null && url.trim()) n.doc.url = url.trim();
+      }
+      saveDB();
+      showToast('Đã cập nhật nội dung.', 'success');
+      openCourseManagerModal();
+    }
+
+    function adminDeleteCourseNode(type, bigId, smallId, topicId, lessonId, docId) {
+      if (currentUser?.role !== 'admin') return showToast('Chỉ Admin mới có quyền xóa.', 'error');
+      const n = getAdminCourseNode(bigId, smallId, topicId, lessonId, docId);
+      const node = ({ big:n.big, small:n.small, topic:n.topic, lesson:n.lesson, doc:n.doc })[type];
+      if (!node) return showToast('Không tìm thấy mục cần xóa.', 'error');
+      if (!confirm(`Bạn chắc chắn muốn xóa "${node.title}"? Thao tác này không thể hoàn tác.`)) return;
+      if (type === 'big') DB.courses = DB.courses.filter(x => x.id !== bigId);
+      if (type === 'small') n.big.smallCourses = (n.big.smallCourses || []).filter(x => x.id !== smallId);
+      if (type === 'topic') n.small.topics = (n.small.topics || []).filter(x => x.id !== topicId);
+      if (type === 'lesson') n.topic.lessons = (n.topic.lessons || []).filter(x => x.id !== lessonId);
+      if (type === 'doc') n.lesson.documents = (n.lesson.documents || []).filter(x => x.id !== docId);
+      saveDB();
+      showToast('Đã xóa mục đã chọn.', 'success');
+      openCourseManagerModal();
+      handleRoute();
+    }
+
+    function adminAddDocumentToLesson(bigId, smallId, topicId, lessonId) {
+      if (currentUser?.role !== 'admin') return showToast('Chỉ Admin mới có quyền thêm tài liệu.', 'error');
+      const n = getAdminCourseNode(bigId, smallId, topicId, lessonId);
+      if (!n.lesson) return showToast('Không tìm thấy bài giảng.', 'error');
+      const title = prompt('Tên tài liệu mới:');
+      if (title === null || !title.trim()) return;
+      const url = prompt('Đường dẫn tài liệu:');
+      if (url === null || !url.trim()) return;
+      n.lesson.documents = n.lesson.documents || [];
+      n.lesson.documents.push({ id: 'doc_' + Date.now(), title: title.trim(), url: url.trim(), type: 'Tài liệu' });
+      saveDB();
+      showToast('Đã thêm tài liệu vào bài giảng.', 'success');
+      openCourseManagerModal();
     }
 
     /* =========================================================================
@@ -3679,6 +3827,9 @@
         return;
       }
 
+      if (activeLiveRoomId !== room.id) {
+        liveSessionId = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+      }
       activeLiveRoomId = room.id;
       const meta = getLiveStatusMeta(room.status);
       const roomUrl = `#/live/${room.id}`;
@@ -3710,6 +3861,9 @@
                 <button onclick="openLivePermissionModal('${room.id}')" class="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold">
                   <i class="fa-solid fa-user-shield mr-1"></i>Phân quyền HS (${(room.allowedStudentIds || []).length})
                 </button>
+                <button onclick="adminCallRandomStudent('${room.id}')" class="px-3.5 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-extrabold shadow">
+                  <i class="fa-solid fa-dice mr-1"></i>Gọi ngẫu nhiên
+                </button>
               ` : ''}
               <button onclick="copyShareLink('${roomUrl}')" class="px-3.5 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 text-xs font-bold border border-indigo-200 dark:border-indigo-800">
                 <i class="fa-solid fa-link mr-1"></i>Link phòng
@@ -3720,6 +3874,20 @@
             </div>
           </div>
 
+          ${room.randomCall && room.randomCall.status === 'waiting' && room.randomCall.studentId === user.id ? `
+            <div class="rounded-3xl border-2 border-amber-400 bg-amber-50 dark:bg-amber-950/50 p-5 shadow-lg">
+              <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div><div class="font-extrabold text-amber-800 dark:text-amber-300"><i class="fa-solid fa-bell animate-pulse mr-2"></i>THẦY/CÔ ĐANG GỌI BẠN TRẢ LỜI</div><p class="text-xs text-amber-700 dark:text-amber-200 mt-1">Vui lòng bật micro để xác nhận và trả lời trực tiếp trong phòng Live.</p></div>
+                <button onclick="answerRandomLiveCall('${room.id}')" class="px-5 py-3 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-sm font-extrabold"><i class="fa-solid fa-microphone mr-2"></i>Bật mic & trả lời</button>
+              </div>
+            </div>
+          ` : ''}
+          ${isAdmin && room.callHistory?.length ? `
+            <div class="rounded-2xl border border-violet-200 dark:border-violet-800 bg-white dark:bg-slate-900 p-4">
+              <div class="font-extrabold text-sm text-violet-700 dark:text-violet-300 mb-2"><i class="fa-solid fa-clipboard-list mr-2"></i>Lịch sử gọi học sinh</div>
+              <div class="space-y-1.5 max-h-36 overflow-y-auto">${room.callHistory.slice(0,8).map(c => `<div class="flex items-center justify-between gap-2 text-xs border-b border-slate-100 dark:border-slate-800 pb-1.5"><span class="font-semibold">${escapeHtml(c.studentName || 'Học sinh')}</span><span class="text-slate-500">${escapeHtml(c.time || '')} · ${c.status === 'answered' ? 'Đã bật mic trả lời' : (c.status === 'recalled' ? 'Đã gọi lượt khác' : 'Đang chờ')}</span></div>`).join('')}</div>
+            </div>
+          ` : ''}
           <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
             <!-- Cột Trái (8 cột): Màn hình Live + Lưới Camera & Micro nhiều học sinh -->
             <div class="lg:col-span-8 space-y-4">
@@ -3795,7 +3963,7 @@
                       <i class="fa-solid fa-table-cells-large text-indigo-600"></i>
                       <span>Lưới Camera & Micro Thành Viên Trong Phòng Live (${participants.length} học sinh)</span>
                     </h3>
-                    <p class="text-[11px] text-slate-500 dark:text-slate-400">Nhiều học sinh có thể bật Camera & Micro đồng thời. Biểu tượng màu xanh là đang bật, màu đỏ gạch chéo là đang tắt.</p>
+                    <p class="text-[11px] text-slate-500 dark:text-slate-400">Camera/Micro truyền trực tiếp qua WebRTC ngang hàng; nếu mạng NAT/firewall hạn chế, cần cấu hình TURN server để tăng độ ổn định.</p>
                   </div>
                 </div>
 
@@ -3804,14 +3972,18 @@
                     const isMe = p.userId === user.id;
                     return `
                       <div class="relative rounded-2xl overflow-hidden bg-slate-900 border-2 ${p.camOn ? 'border-emerald-500' : 'border-slate-700'} aspect-video flex flex-col justify-between shadow">
+                        ${!isMe && p.micOn ? `<audio id="live-peer-audio-${String(p.userId).replace(/[^a-zA-Z0-9_-]/g, '-')}" autoplay class="hidden"></audio>` : ''}
                         ${isMe && localCamEnabled ? `
                           <video id="live-self-cam-video" autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover"></video>
                         ` : (p.camOn ? `
                           <div class="absolute inset-0 bg-gradient-to-br from-indigo-900 via-slate-900 to-emerald-950 flex flex-col items-center justify-center">
-                            <img src="${p.avatar}" class="w-16 h-16 rounded-full border-2 border-emerald-400 shadow-lg object-cover mb-1.5" />
-                            <span class="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 text-[10px] font-bold">
-                              <i class="fa-solid fa-signal mr-1 animate-pulse"></i>Luồng Camera Trực Tiếp
-                            </span>
+                            <video id="live-peer-video-${String(p.userId).replace(/[^a-zA-Z0-9_-]/g, '-')}" autoplay playsinline class="absolute inset-0 w-full h-full object-cover bg-black"></video>
+                            <div class="live-peer-fallback relative z-[1] pointer-events-none flex flex-col items-center">
+                              <img src="${p.avatar}" class="w-12 h-12 rounded-full border-2 border-emerald-400 shadow-lg object-cover mb-1.5" />
+                              <span class="px-2.5 py-0.5 rounded-full bg-black/70 border border-emerald-400/40 text-emerald-300 text-[10px] font-bold">
+                                <i class="fa-solid fa-video mr-1"></i>Đang kết nối camera
+                              </span>
+                            </div>
                           </div>
                         ` : `
                           <div class="absolute inset-0 bg-slate-900 flex flex-col items-center justify-center">
@@ -3901,6 +4073,19 @@
         const selfVid = document.getElementById('live-self-cam-video');
         if (selfVid) selfVid.srcObject = localMediaStream;
       }
+      Object.entries(liveRemoteStreams).forEach(([peerId, stream]) => {
+        const safePeerId = String(peerId).replace(/[^a-zA-Z0-9_-]/g, '-');
+        const peerVideo = document.getElementById(`live-peer-video-${safePeerId}`);
+        const peerAudio = document.getElementById(`live-peer-audio-${safePeerId}`);
+        if (peerVideo) {
+          if (peerVideo.srcObject !== stream) peerVideo.srcObject = stream;
+          const fallback = peerVideo.parentElement?.querySelector('.live-peer-fallback');
+          if (fallback) fallback.classList.add('hidden');
+        } else if (peerAudio && peerAudio.srcObject !== stream) {
+          peerAudio.srcObject = stream;
+        }
+      });
+      connectLivePeers(room);
     }
 
     function adminChangeLiveStatus(roomId, newStatus) {
@@ -3975,6 +4160,193 @@
       handleRoute();
     }
 
+    function livePeerKey(roomId, peerId) {
+      return `${roomId}::${peerId}`;
+    }
+
+    async function connectLivePeers(room) {
+      if (!room || !currentUser || !localMediaStream || !window.RTCPeerConnection) return;
+      const activePeers = (room.participants || []).filter(p =>
+        p.userId !== currentUser.id && (p.camOn || p.micOn)
+      );
+      for (const participant of activePeers) {
+        const remoteId = participant.userId;
+        const stateKey = livePeerKey(room.id, remoteId);
+        if (livePeerConnections[stateKey]) continue;
+        const sessionById = {
+          [currentUser.id]: liveSessionId || 'local',
+          [remoteId]: participant.sessionId || 'legacy'
+        };
+        const ids = [currentUser.id, remoteId].sort();
+        const initiatorId = ids[0];
+        const isInitiator = currentUser.id === initiatorId;
+        const channel = `${ids[0]}_${sessionById[ids[0]]}_${ids[1]}_${sessionById[ids[1]]}`;
+        const basePath = `liveSignaling/${room.id}/${channel}`;
+        const pc = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+        const state = {
+          pc, remoteId, pendingCandidates: [], seenCandidates: new Set(),
+          remoteDescriptionReady: false, lastOfferSdp: '', unsubs: []
+        };
+        livePeerConnections[stateKey] = state;
+        localMediaStream.getTracks().forEach(track => {
+          try { pc.addTrack(track, localMediaStream); } catch (err) { console.warn('Không thể gắn track Live:', err); }
+        });
+
+        const flushCandidates = async () => {
+          if (!state.remoteDescriptionReady) return;
+          while (state.pendingCandidates.length) {
+            const candidate = state.pendingCandidates.shift();
+            try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); }
+            catch (err) { console.warn('ICE candidate bị bỏ qua:', err); }
+          }
+        };
+        const remoteVideoId = `live-peer-video-${String(remoteId).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+        pc.ontrack = event => {
+          const stream = event.streams?.[0];
+          if (!stream) return;
+          liveRemoteStreams[remoteId] = stream;
+          const video = document.getElementById(remoteVideoId);
+          const audio = document.getElementById(`live-peer-audio-${String(remoteId).replace(/[^a-zA-Z0-9_-]/g, '-')}`);
+          if (video) {
+            if (video.srcObject !== stream) video.srcObject = stream;
+            const fallback = video.parentElement?.querySelector('.live-peer-fallback');
+            if (fallback) fallback.classList.add('hidden');
+            video.play?.().catch(() => {});
+          } else if (audio && audio.srcObject !== stream) {
+            audio.srcObject = stream;
+            audio.play?.().catch(() => {});
+          }
+        };
+        pc.onicecandidate = event => {
+          if (!event.candidate) return;
+          const candidateKey = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+          set(ref(rtdb, `${basePath}/candidates/${currentUser.id}/${candidateKey}`), event.candidate.toJSON())
+            .catch(err => console.warn('Không gửi được ICE candidate:', err));
+        };
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === 'failed') {
+            showToast('Kết nối camera/micro ngang hàng thất bại. Máy chủ TURN có thể cần được cấu hình.', 'warning');
+          }
+        };
+
+        const remoteCandidateRef = ref(rtdb, `${basePath}/candidates/${remoteId}`);
+        state.unsubs.push(onValue(remoteCandidateRef, snapshot => {
+          const candidates = snapshot.val() || {};
+          Object.entries(candidates).forEach(([key, candidate]) => {
+            if (state.seenCandidates.has(key)) return;
+            state.seenCandidates.add(key);
+            if (state.remoteDescriptionReady) {
+              pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(err => console.warn('ICE:', err));
+            } else {
+              state.pendingCandidates.push(candidate);
+            }
+          });
+        }));
+
+        if (isInitiator) {
+          const answerRef = ref(rtdb, `${basePath}/answer`);
+          state.unsubs.push(onValue(answerRef, async snapshot => {
+            const answer = snapshot.val();
+            if (!answer || pc.remoteDescription) return;
+            try {
+              await pc.setRemoteDescription(new RTCSessionDescription(answer));
+              state.remoteDescriptionReady = true;
+              await flushCandidates();
+            } catch (err) { console.warn('Không nhận được SDP answer:', err); }
+          }));
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            await set(ref(rtdb, `${basePath}/offer`), { type: pc.localDescription.type, sdp: pc.localDescription.sdp });
+          } catch (err) {
+            console.warn('Không tạo được SDP offer:', err);
+            showToast('Không thể khởi tạo kết nối camera/micro.', 'warning');
+          }
+        } else {
+          const offerRef = ref(rtdb, `${basePath}/offer`);
+          state.unsubs.push(onValue(offerRef, async snapshot => {
+            const offer = snapshot.val();
+            if (!offer || offer.sdp === state.lastOfferSdp || pc.signalingState !== 'stable') return;
+            try {
+              state.lastOfferSdp = offer.sdp;
+              await pc.setRemoteDescription(new RTCSessionDescription(offer));
+              state.remoteDescriptionReady = true;
+              await flushCandidates();
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
+              await set(ref(rtdb, `${basePath}/answer`), { type: pc.localDescription.type, sdp: pc.localDescription.sdp });
+            } catch (err) {
+              console.warn('Không xử lý được SDP offer:', err);
+              showToast('Không thể nhận luồng camera/micro từ thành viên khác.', 'warning');
+            }
+          }));
+        }
+      }
+    }
+
+    function closeLivePeerConnections() {
+      Object.entries(livePeerConnections).forEach(([key, state]) => {
+        try { state.unsubs?.forEach(unsub => unsub()); } catch (e) {}
+        try { state.pc?.close(); } catch (e) {}
+        delete livePeerConnections[key];
+      });
+      Object.keys(liveRemoteStreams).forEach(key => delete liveRemoteStreams[key]);
+    }
+
+    function adminCallRandomStudent(roomId) {
+      if (currentUser?.role !== 'admin') return showToast('Chỉ Admin mới được gọi học sinh.', 'error');
+      const room = DB.liveRooms.find(r => r.id === roomId);
+      if (!room) return;
+      const allowed = new Set(room.allowedStudentIds || []);
+      let candidates = DB.users.filter(u => u.role === 'student' && u.status === 'active' && allowed.has(u.id));
+      if (!candidates.length) return showToast('Phòng chưa có học sinh được phân quyền để gọi.', 'warning');
+      const previousId = room.randomCall?.studentId;
+      if (room.randomCall?.status === 'waiting') {
+        const previousLog = (room.callHistory || []).find(c => c.id === room.randomCall.id);
+        if (previousLog) previousLog.status = 'recalled';
+      }
+      if (candidates.length > 1) candidates = candidates.filter(u => u.id !== previousId);
+      const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+      const now = new Date();
+      const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')} ${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')}`;
+      const call = { id: 'call_' + Date.now(), studentId: chosen.id, studentName: chosen.name, calledBy: currentUser.name, time, status: 'waiting', calledAt: Date.now() };
+      room.randomCall = call;
+      room.callHistory = room.callHistory || [];
+      room.callHistory.unshift({ ...call });
+      room.callHistory = room.callHistory.slice(0, 50);
+      DB.notifications.unshift({
+        id: 'n_call_' + Date.now(),
+        targetUserId: chosen.id,
+        title: 'Bạn được mời trả lời trong phòng Live',
+        content: `Thầy/cô đã gọi ${chosen.name}. Hãy vào phòng Live "${room.title}" và bật micro để trả lời.`,
+        time, urgent: true, readBy: []
+      });
+      saveDB();
+      updateHeaderUI();
+      showToast(`Đã gọi ngẫu nhiên: ${chosen.name}.`, 'success');
+      handleRoute();
+    }
+
+    async function answerRandomLiveCall(roomId) {
+      const room = DB.liveRooms.find(r => r.id === roomId);
+      if (!room || room.randomCall?.studentId !== currentUser?.id || room.randomCall.status !== 'waiting') {
+        return showToast('Lời gọi này không còn hiệu lực.', 'warning');
+      }
+      await toggleStudentMic(roomId);
+      if (!localMicEnabled) return;
+      room.randomCall.status = 'answered';
+      room.randomCall.answeredAt = Date.now();
+      const historyItem = (room.callHistory || []).find(c => c.id === room.randomCall.id);
+      if (historyItem) historyItem.status = 'answered';
+      if (!room.messages) room.messages = [];
+      room.messages.push({ id: 'm_' + Date.now(), user: currentUser.name, role: 'student', text: 'Em đã bật micro và sẵn sàng trả lời ạ.', time: new Date().toLocaleTimeString('vi-VN', { hour:'2-digit', minute:'2-digit' }) });
+      saveDB();
+      showToast('Đã bật micro và xác nhận trả lời.', 'success');
+      handleRoute();
+    }
+
     function syncMyLiveParticipantState(roomId, camOn, micOn) {
       const room = DB.liveRooms.find(r => r.id === roomId);
       if (!room) return;
@@ -4001,7 +4373,7 @@
       if (!localCamEnabled) {
         try {
           if (!localMediaStream) {
-            localMediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            localMediaStream = await navigator.mediaDevices.getUserMedia({ video: true });
           } else if (!localMediaStream.getVideoTracks().length) {
             const vidStream = await navigator.mediaDevices.getUserMedia({ video: true });
             vidStream.getVideoTracks().forEach(t => localMediaStream.addTrack(t));
@@ -4010,9 +4382,9 @@
           localCamEnabled = true;
           showToast('Đã BẬT Camera của bạn trong phòng Live!', 'success');
         } catch (err) {
-          // Vẫn cho phép bật trạng thái trên lưới nếu thiết bị không có webcam vật lý
-          localCamEnabled = true;
-          showToast('Đã bật trạng thái Camera (Chế độ mô phỏng do trình duyệt chưa cấp quyền thiết bị).', 'info');
+          localCamEnabled = false;
+          showToast('Không thể bật camera. Hãy kiểm tra quyền truy cập camera và thiết bị của trình duyệt.', 'error');
+          return;
         }
       } else {
         if (localMediaStream) {
@@ -4038,8 +4410,9 @@
           localMicEnabled = true;
           showToast('Đã BẬT Micro của bạn trong phòng Live!', 'success');
         } catch (err) {
-          localMicEnabled = true;
-          showToast('Đã bật trạng thái Micro (Chế độ mô phỏng).', 'info');
+          localMicEnabled = false;
+          showToast('Không thể bật micro. Hãy kiểm tra quyền truy cập micro và thiết bị của trình duyệt.', 'error');
+          return;
         }
       } else {
         if (localMediaStream) {
@@ -4053,6 +4426,7 @@
     }
 
     function cleanupLiveMedia() {
+      closeLivePeerConnections();
       if (localMediaStream) {
         localMediaStream.getTracks().forEach(t => t.stop());
         localMediaStream = null;
@@ -4071,6 +4445,7 @@
         }
       }
       activeLiveRoomId = null;
+      liveSessionId = null;
     }
 
     function changeLiveQuality(roomId, quality) {
@@ -5710,6 +6085,11 @@
       adminAddTopic,
       adminAddLesson,
       adminDeleteBigCourse,
+      adminEditCourseNode,
+      adminDeleteCourseNode,
+      adminAddDocumentToLesson,
+      adminCallRandomStudent,
+      answerRandomLiveCall,
       redeemActivationCode,
       adminGenerateActivationCode,
       copyToClipboard,
