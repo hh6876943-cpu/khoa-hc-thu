@@ -3828,6 +3828,7 @@
       }
 
       if (activeLiveRoomId !== room.id) {
+        closeLivePeerConnections();
         liveSessionId = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
       }
       activeLiveRoomId = room.id;
@@ -4164,8 +4165,22 @@
       return `${roomId}::${peerId}`;
     }
 
+    // Gắn/bỏ track vào các kết nối đang tồn tại mà không phải tạo lại phiên WebRTC.
+    async function syncLiveTracksToPeers() {
+      const audioTrack = localMediaStream?.getAudioTracks().find(t => t.readyState === 'live' && t.enabled) || null;
+      const videoTrack = localMediaStream?.getVideoTracks().find(t => t.readyState === 'live' && t.enabled) || null;
+      const jobs = [];
+      Object.values(livePeerConnections).forEach(state => {
+        if (!state || state.pc?.connectionState === 'closed') return;
+        if (state.audioSender) jobs.push(state.audioSender.replaceTrack(audioTrack).catch(err => console.warn('Không cập nhật được track audio:', err)));
+        if (state.videoSender) jobs.push(state.videoSender.replaceTrack(videoTrack).catch(err => console.warn('Không cập nhật được track video:', err)));
+      });
+      await Promise.all(jobs);
+    }
+
     async function connectLivePeers(room) {
-      if (!room || !currentUser || !localMediaStream || !window.RTCPeerConnection) return;
+      if (!room || !currentUser || !window.RTCPeerConnection || activeLiveRoomId !== room.id) return;
+      // Mỗi thành viên đang phát ít nhất một track đều cần kết nối với tất cả thành viên phát khác.
       const activePeers = (room.participants || []).filter(p =>
         p.userId !== currentUser.id && (p.camOn || p.micOn)
       );
@@ -4173,26 +4188,45 @@
         const remoteId = participant.userId;
         const stateKey = livePeerKey(room.id, remoteId);
         if (livePeerConnections[stateKey]) continue;
+
         const sessionById = {
           [currentUser.id]: liveSessionId || 'local',
           [remoteId]: participant.sessionId || 'legacy'
         };
         const ids = [currentUser.id, remoteId].sort();
-        const initiatorId = ids[0];
-        const isInitiator = currentUser.id === initiatorId;
         const channel = `${ids[0]}_${sessionById[ids[0]]}_${ids[1]}_${sessionById[ids[1]]}`;
         const basePath = `liveSignaling/${room.id}/${channel}`;
+        // Chỉ một đầu tạo offer; đầu còn lại nhận offer và trả lời.
+        const isInitiator = currentUser.id === ids[0];
         const pc = new RTCPeerConnection({
-          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+          ]
         });
         const state = {
           pc, remoteId, pendingCandidates: [], seenCandidates: new Set(),
-          remoteDescriptionReady: false, lastOfferSdp: '', unsubs: []
+          remoteDescriptionReady: false, lastOfferSdp: '', unsubs: [],
+          audioSender: null, videoSender: null
         };
         livePeerConnections[stateKey] = state;
-        localMediaStream.getTracks().forEach(track => {
-          try { pc.addTrack(track, localMediaStream); } catch (err) { console.warn('Không thể gắn track Live:', err); }
-        });
+
+        // Tạo sẵn hai hướng gửi/nhận. Nhờ vậy người đang tắt mic/cam vẫn nhận được
+        // media của người khác; bật media sau đó chỉ cần replaceTrack, không cần renegotiate.
+        try {
+          const audioTransceiver = pc.addTransceiver('audio', { direction: 'sendrecv' });
+          const videoTransceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
+          state.audioSender = audioTransceiver.sender;
+          state.videoSender = videoTransceiver.sender;
+          const audioTrack = localMediaStream?.getAudioTracks().find(t => t.readyState === 'live' && t.enabled) || null;
+          const videoTrack = localMediaStream?.getVideoTracks().find(t => t.readyState === 'live' && t.enabled) || null;
+          await Promise.all([
+            state.audioSender.replaceTrack(audioTrack),
+            state.videoSender.replaceTrack(videoTrack)
+          ]);
+        } catch (err) {
+          console.warn('Không khởi tạo được media sender:', err);
+        }
 
         const flushCandidates = async () => {
           if (!state.remoteDescriptionReady) return;
@@ -4202,19 +4236,23 @@
             catch (err) { console.warn('ICE candidate bị bỏ qua:', err); }
           }
         };
-        const remoteVideoId = `live-peer-video-${String(remoteId).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+        const safeRemoteId = String(remoteId).replace(/[^a-zA-Z0-9_-]/g, '-');
         pc.ontrack = event => {
-          const stream = event.streams?.[0];
-          if (!stream) return;
+          let stream = event.streams?.[0];
+          if (!stream) {
+            stream = liveRemoteStreams[remoteId] || new MediaStream();
+            if (!stream.getTracks().some(t => t.id === event.track.id)) stream.addTrack(event.track);
+          }
           liveRemoteStreams[remoteId] = stream;
-          const video = document.getElementById(remoteVideoId);
-          const audio = document.getElementById(`live-peer-audio-${String(remoteId).replace(/[^a-zA-Z0-9_-]/g, '-')}`);
+          const video = document.getElementById(`live-peer-video-${safeRemoteId}`);
+          const audio = document.getElementById(`live-peer-audio-${safeRemoteId}`);
           if (video) {
             if (video.srcObject !== stream) video.srcObject = stream;
             const fallback = video.parentElement?.querySelector('.live-peer-fallback');
             if (fallback) fallback.classList.add('hidden');
             video.play?.().catch(() => {});
-          } else if (audio && audio.srcObject !== stream) {
+          }
+          if (audio && audio.srcObject !== stream) {
             audio.srcObject = stream;
             audio.play?.().catch(() => {});
           }
@@ -4227,7 +4265,7 @@
         };
         pc.onconnectionstatechange = () => {
           if (pc.connectionState === 'failed') {
-            showToast('Kết nối camera/micro ngang hàng thất bại. Máy chủ TURN có thể cần được cấu hình.', 'warning');
+            showToast('Kết nối camera/micro thất bại. Mạng hiện tại có thể cần TURN server để vượt NAT/firewall.', 'warning');
           }
         };
 
@@ -4249,7 +4287,7 @@
           const answerRef = ref(rtdb, `${basePath}/answer`);
           state.unsubs.push(onValue(answerRef, async snapshot => {
             const answer = snapshot.val();
-            if (!answer || pc.remoteDescription) return;
+            if (!answer || pc.remoteDescription || pc.signalingState === 'closed') return;
             try {
               await pc.setRemoteDescription(new RTCSessionDescription(answer));
               state.remoteDescriptionReady = true;
@@ -4357,13 +4395,15 @@
         room.participants[idx].micOn = micOn;
         room.participants[idx].name = currentUser.name;
         room.participants[idx].avatar = currentUser.avatar;
+        room.participants[idx].sessionId = liveSessionId || room.participants[idx].sessionId || 'legacy';
       } else {
         room.participants.unshift({
           userId: currentUser.id,
           name: currentUser.name,
           avatar: currentUser.avatar,
           camOn,
-          micOn
+          micOn,
+          sessionId: liveSessionId || 'legacy'
         });
       }
       saveDB();
@@ -4394,6 +4434,7 @@
         showToast('Đã TẮT Camera của bạn.', 'info');
       }
       syncMyLiveParticipantState(roomId, localCamEnabled, localMicEnabled);
+      await syncLiveTracksToPeers();
       handleRoute();
     }
 
@@ -4422,6 +4463,7 @@
         showToast('Đã TẮT Micro của bạn.', 'info');
       }
       syncMyLiveParticipantState(roomId, localCamEnabled, localMicEnabled);
+      await syncLiveTracksToPeers();
       handleRoute();
     }
 
